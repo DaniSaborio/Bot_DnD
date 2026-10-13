@@ -75,7 +75,7 @@ Requisitos:
 - **Node.js 20.12 o superior** (en Arch/Garuda: `sudo pacman -S nodejs npm`; en Windows/macOS: https://nodejs.org, versión LTS).
 - **Obsidian** con una bóveda creada.
 - Una cuenta de Discord y un servidor donde seas dueño o admin.
-- Una API key de Gemini: entrá a https://aistudio.google.com/apikey con tu cuenta de Google → **Create API key** (gratis, sin tarjeta).
+- Una API key de Gemini: entrá a https://aistudio.google.com/apikey con tu cuenta de Google → **Create API key**. **No actives la facturación** ("Set up billing") en ese proyecto: así Google nunca puede cobrarte, y cuando se acaba la cuota gratuita el bot simplemente avisa y espera.
 
 > El bot corre en tu computadora: **solo responde mientras esté prendida y con el bot corriendo**. Para tenerlo siempre activo, ver [Dejarlo corriendo siempre](#dejarlo-corriendo-siempre-linux).
 
@@ -159,7 +159,7 @@ Las campañas guardadas en D1 no se migran solas. Pasos: en el portal de Discord
 | `npm run register` → `403 Missing Access (50001)` | El bot no está en ese servidor o el `DISCORD_GUILD_ID` es de otro servidor. Invitalo (paso 2) y verificá el ID. |
 | Los comandos no aparecen | Registralos con `DISCORD_GUILD_ID` puesto. Probá también reiniciar Discord (Ctrl+R). |
 | `process.loadEnvFile is not a function` | Node es muy viejo: instalá la versión 20.12 o superior. |
-| "Se alcanzó el límite de uso de Gemini" | La capa gratuita tiene límites por minuto y por día (se reinician a medianoche hora del Pacífico). Esperen, o cambien a `gemini-3.5-flash-lite`, que tiene más cuota. Ver tus límites en https://aistudio.google.com. |
+| "Se acabó la cuota gratuita de Gemini en todos los modelos" | Se usó la cuota de los tres modelos. Si fue la de por minuto, esperen un minuto; si fue la diaria, se reinicia a medianoche hora del Pacífico (01:00 en Costa Rica). Ver tus límites en https://aistudio.google.com/rate-limit. |
 | "Gemini bloqueó la respuesta" | Los filtros de seguridad de Google frenaron la escena. Reformulen la acción o pidan al DM que siga con `/narrar`. |
 | `/importar` dice que el PDF no tiene texto | Es una foto o un escaneo. Exportá la ficha como PDF desde Nivel20, D&D Beyond o la hoja rellenable. |
 | `/importar` con enlace falla | La ficha debe ser visible con el enlace de **Compartir** de Nivel20; si igual falla, usá el PDF. `/unirse` funciona sin ficha. |
@@ -167,7 +167,7 @@ Las campañas guardadas en D1 no se migran solas. Pasos: en el portal de Discord
 ## Configuración
 
 Todo en `.env` (reiniciá el bot después de cambiarlo):
-- **Modelo:** `GEMINI_MODEL`. `gemini-3.8-flash` narra mejor; `gemini-3.5-flash-lite` es más rápido y tiene más cuota gratuita.
+- **Modelos:** `GEMINI_MODEL`, una lista separada por comas. El bot usa el primero y, si se le acaba la cuota gratuita, pasa al siguiente (cada modelo tiene su propia cuota). Por defecto: `gemini-3.8-flash` (narra mejor), luego `gemini-3.5-flash-lite` y `gemini-3.1-flash-lite`.
 - **Razonamiento:** `GEMINI_THINKING` (`low`, `medium`, `high`). Más alto puede mejorar combates complejos, pero tarda más y gasta más cuota.
 - **Carpeta en la bóveda:** `OBSIDIAN_FOLDER` (por defecto `DnD`).
 
@@ -188,6 +188,12 @@ Discord ◀──(gateway)──▶ bot en tu PC (Node + discord.js) ──▶ b
 - Las notas se leen del disco en cada comando, así que lo que edites en Obsidian se usa enseguida.
 - Un candado evita que dos acciones simultáneas generen dos narraciones, y las escrituras de un mismo canal van en fila.
 - Si la API falla, las acciones quedan en `Pendientes.md` y basta con `/narrar`.
+
+## ¿Cuánto podemos jugar gratis?
+
+Cada narración del DM, `/ooc`, `/importar` y cada resumen automático (uno cada ~10 turnos) es **un pedido** a Gemini; `/accion` y `/tirar` sin narración no gastan nada. Una sesión de 3 horas son unos **100 pedidos**. Compará eso con el límite de pedidos por día de cada modelo en https://aistudio.google.com/rate-limit: como el bot salta al siguiente modelo cuando se agota uno, la cuota diaria total es la suma de los tres.
+
+En la consola el bot muestra los tokens y el modelo de cada pedido, para ver el consumo real.
 
 ## Límites conocidos
 
