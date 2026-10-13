@@ -42,6 +42,9 @@ interface GeminiResponse {
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number };
 }
 
+// Tiempo máximo por modelo: si uno se cuelga, se prueba el siguiente sin hacer esperar de más a los jugadores.
+const TIMEOUT_MS = 40_000;
+
 /** Error que permite pasar al respaldo local (sin cuota o sin conexión con Gemini). */
 class FallbackError extends Error {}
 
@@ -106,40 +109,72 @@ async function callGemini(env: AIEnv, task: Task, system: string, messages: Chat
   const order = models.filter((m) => !isCoolingDown(m));
   let res: Response | undefined;
   let model = "";
+  // Por qué falló el último modelo, para elegir el mensaje si fallan todos.
+  let failure: "cuota" | "saturado" | "lento" | "red" | "" = "";
+
+  const send = () =>
+    fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "x-goog-api-key": env.GEMINI_API_KEY!, "content-type": "application/json" },
+      body,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+
   for (model of order.length ? order : models) {
+    res = undefined;
     try {
-      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-        method: "POST",
-        headers: { "x-goog-api-key": env.GEMINI_API_KEY, "content-type": "application/json" },
-        body,
-        signal: AbortSignal.timeout(60_000),
-      });
-    } catch {
-      throw new FallbackError("No pude conectarme con Gemini (¿sin internet?).");
+      res = await send();
+      // 503 = Google saturado: suele pasar en segundos, así que un reintento corto antes de bajar a un modelo peor.
+      if (res.status === 503) {
+        console.warn(`Gemini ${model}: saturado, reintento en 2 s`);
+        await new Promise((r) => setTimeout(r, 2000));
+        res = await send();
+      }
+    } catch (e) {
+      const timeout = (e as Error).name === "TimeoutError";
+      failure = timeout ? "lento" : "red";
+      console.warn(`Gemini ${model}: ${timeout ? `no respondió en ${TIMEOUT_MS / 1000} s` : "error de conexión"}, probando el siguiente modelo`);
+      continue;
     }
     if (res.status === 429) {
       recordLimited(model);
+      failure = "cuota";
       console.warn(`Gemini ${model}: sin cuota, probando el siguiente modelo`);
+      continue;
+    }
+    if (res.status >= 500) {
+      failure = "saturado";
+      console.warn(`Gemini ${model}: no disponible (${res.status}), probando el siguiente modelo`);
       continue;
     }
     // 404 = el modelo no está disponible para esta key. Probamos el siguiente.
     if (res.status === 404) {
-      console.warn(`Gemini ${model}: no disponible, probando el siguiente modelo`);
+      console.warn(`Gemini ${model}: no existe para esta key, probando el siguiente modelo`);
       continue;
     }
     recordRequest(model);
+    failure = "";
     break;
   }
 
-  if (!res!.ok) {
-    const text = (await res!.text()).slice(0, 300);
-    if (res!.status === 429) throw new FallbackError("Se acabó la cuota gratuita de Gemini.");
-    if (res!.status === 400 && /API key/i.test(text)) throw new Error("La GEMINI_API_KEY no es válida.");
-    if (res!.status >= 500) throw new FallbackError(`Gemini no está disponible (${res!.status}).`);
-    throw new Error(`Gemini respondió ${res!.status}: ${text}`);
+  if (failure || !res) {
+    const why = {
+      cuota: "Se acabó la cuota gratuita de Gemini.",
+      saturado: "Gemini está saturado en este momento.",
+      lento: "Gemini está tardando demasiado en responder.",
+      red: "No pude conectarme con Gemini (¿sin internet?).",
+      "": "Ningún modelo de Gemini está disponible para esta key.",
+    }[failure];
+    throw new FallbackError(why);
+  }
+  if (!res.ok) {
+    const text = (await res.text()).slice(0, 300);
+    if (res.status === 400 && /API key/i.test(text)) throw new Error("La GEMINI_API_KEY no es válida.");
+    if (res.status === 404) throw new FallbackError("Ningún modelo de Gemini está disponible para esta key.");
+    throw new Error(`Gemini respondió ${res.status}: ${text}`);
   }
 
-  const data = (await res!.json()) as GeminiResponse;
+  const data = (await res.json()) as GeminiResponse;
   const u = data.usageMetadata;
   if (u) console.log(`Gemini ${model}: ${u.promptTokenCount ?? 0} tokens de entrada, ${(u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0)} de salida`);
   if (data.promptFeedback?.blockReason) throw new Error(`Gemini bloqueó el mensaje (${data.promptFeedback.blockReason}); reformulen la acción.`);

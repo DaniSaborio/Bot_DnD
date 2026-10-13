@@ -358,3 +358,39 @@ test("lector en código: sin datos claros no inventa nada", async () => {
   assert.deepEqual(p.caracteristicas, {});
   assert.deepEqual(p.habilidades, {});
 });
+
+test("Gemini saturado (503) o colgado: reintenta y pasa al siguiente modelo de Gemini antes que al local", async () => {
+  const original = globalThis.fetch;
+  const seen: string[] = [];
+  const script: Record<string, (string | number)[]> = {
+    "gemini-3.8-flash": [503, 200], // se recupera con el reintento
+  };
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input);
+    const model = url.includes("/models/") ? url.split("/models/")[1].split(":")[0] : "ollama";
+    seen.push(model);
+    const next = script[model]?.shift() ?? 200;
+    if (next === "timeout") throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
+    if (next !== 200) return new Response("{}", { status: Number(next) });
+    return new Response(JSON.stringify(model === "ollama" ? { message: { content: "local" } } : { candidates: [{ content: { parts: [{ text: `ok ${model}` }] } }] }));
+  }) as typeof fetch;
+  try {
+    const msg = [{ role: "user" as const, content: "hola" }];
+    assert.equal(await callAI(env, "narrar", "s", msg, 50), "ok gemini-3.8-flash");
+    assert.deepEqual(seen.splice(0), ["gemini-3.8-flash", "gemini-3.8-flash"]);
+
+    script["gemini-3.8-flash"] = [503, 503];
+    assert.equal(await callAI(env, "narrar", "s", msg, 50), "ok gemini-3.5-flash-lite");
+    assert.deepEqual(seen.splice(0), ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]);
+
+    script["gemini-3.8-flash"] = ["timeout"];
+    assert.equal(await callAI(env, "narrar", "s", msg, 50), "ok gemini-3.5-flash-lite");
+
+    script["gemini-3.8-flash"] = [500];
+    script["gemini-3.5-flash-lite"] = ["timeout"];
+    script["gemini-3.1-flash-lite"] = [503, 503];
+    assert.equal(await callAI(env, "narrar", "s", msg, 50), "local", "solo si fallan todos narra el modelo local");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
