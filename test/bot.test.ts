@@ -5,7 +5,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as db from "../src/vault";
-import { runTurn, advance, resolveRoll, maybeCompact, quotaReport } from "../src/game";
+import { runTurn, advance, resolveRoll, maybeCompact, quotaReport, turnLength } from "../src/game";
 import { callAI } from "../src/ai";
 import { sheetBonus, withBonus, brief } from "../src/arbiter";
 import { statsFromImport, statsFromProps, statsToProps, bonusFor } from "../src/stats";
@@ -393,4 +393,24 @@ test("Gemini saturado (503) o colgado: reintenta y pasa al siguiente modelo de G
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("el largo de la narración depende de lo que pasó en el turno", async () => {
+  assert.equal(turnLength(["Kael: me siento y pido una cerveza"]), "breve");
+  assert.equal(turnLength(["Lyra tira Sigilo 1d20+7: 1d20[3] + 7 = 10 vs CD 15 → fallo [esconderse]"]), "breve", "fallo común");
+  assert.equal(turnLength(["Lyra tira Sigilo 1d20+7: 1d20[1] + 7 = 8 vs CD 15 → fallo (1 natural) [esconderse]"]), "larga", "fallo grave");
+  assert.equal(turnLength(["Kael tira Atletismo 1d20+5: 1d20[15] + 5 = 20 vs CD 15 → éxito"]), "media");
+  assert.equal(turnLength(["Kael tira Ataque con Espada larga 1d20+5: 1d20[4] + 5 = 9 vs CD 13 → fallo"]), "media", "combate");
+  assert.equal(turnLength(["Kael tira Ataque con Espada larga 1d20+5: 1d20[20] + 5 = 25 vs CD 13 → éxito (¡crítico!), daño 14"]), "larga");
+  assert.equal(turnLength([], "Comienza la campaña"), "larga");
+
+  const ch = await newChannel();
+  geminiStatus = 200;
+  await db.addPending(ch, "111", "Kael: me siento en la taberna");
+  await runTurn(env, ch);
+  const call = calls.at(-1)!;
+  assert.match(call.body.contents.at(-1).parts[0].text, /\[Extensión: breve/);
+  assert.equal(call.body.generationConfig.maxOutputTokens, 900, "300 tokens de narración + margen para razonar");
+  const saved = await db.getMessages(ch);
+  assert.doesNotMatch(saved.at(-2)!.content, /Extensión/, "la indicación no se guarda en el historial");
 });

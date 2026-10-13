@@ -15,7 +15,23 @@ export interface GameEnv extends AIEnv {
   GEMINI_LIMITS?: string;
 }
 
-const NARRATION_TOKENS = 900;
+// Largo máximo de la narración según lo que pasó en el turno: lo trivial y los fallos comunes, cortos.
+const LENGTH = {
+  breve: { tokens: 300, hint: "breve: 1 a 3 oraciones, sin descripciones de relleno" },
+  media: { tokens: 550, hint: "media: 1 o 2 párrafos cortos" },
+  larga: { tokens: 900, hint: "larga: hasta 3 párrafos cortos, es un momento importante" },
+} as const;
+
+/** Decide cuánto texto merece el turno mirando las tiradas resueltas, sin gastar IA. */
+export function turnLength(lines: string[], instruction?: string): keyof typeof LENGTH {
+  if (instruction) return "larga";
+  const text = lines.join("\n");
+  if (/¡crítico!|20 natural|1 natural/.test(text)) return "larga";
+  const rolls = lines.filter((l) => / vs CD \d+ → /.test(l));
+  if (rolls.some((l) => / tira Ataque /.test(l))) return "media"; // combate
+  if (rolls.some((l) => /→ éxito/.test(l))) return "media";
+  return "breve"; // sin tiradas (acciones triviales) o solo fallos comunes
+}
 // El narrador recibe el resumen + los mensajes todavía no resumidos. Cuando pasan de COMPACT_AFTER,
 // se resumen todos menos los últimos KEEP_RECENT: así cada pedido queda chico aunque la campaña dure meses.
 const COMPACT_AFTER = 16;
@@ -35,14 +51,15 @@ export async function runTurn(env: GameEnv, ch: string, instruction?: string): P
     for (const r of rolls) lines.push(`(${r.character} no llegó a tirar ${r.tipo}.)`);
     if (!lines.length && !instruction) lines.push("(Los jugadores no declaran acciones nuevas. Continuá la escena.)");
     if (instruction) lines.push(`[Indicación para el DM: ${instruction}]`);
+    const length = LENGTH[turnLength(lines, instruction)];
     const userBlock = lines.join("\n");
 
     const narration = await callAI(
       env,
       "narrar",
       dmSystemPrompt(camp, players),
-      [...history.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: userBlock }],
-      NARRATION_TOKENS,
+      [...history.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: `${userBlock}\n[Extensión: ${length.hint}]` }],
+      length.tokens,
     );
 
     const maxId = pending.length ? pending[pending.length - 1].id : 0;
@@ -106,7 +123,7 @@ export async function resolveRoll(ch: string, userId: string, by: { rollId: numb
   const verdict = success ? "éxito" : "fallo";
   const plain =
     `${req.character} tira ${req.tipo} ${expr}: ${roll.detail.replace(/~~/g, "")} = ${roll.total} vs CD ${req.cd} → ${verdict}` +
-    (crit ? " (¡crítico!)" : "") +
+    (crit ? " (¡crítico!)" : roll.note ? ` (${roll.note.replace(/\.+$/, "")})` : "") +
     (damage ? `, daño ${damage.total}` : "") +
     (req.motivo ? ` [${req.motivo}]` : "");
   await db.addPending(ch, userId, plain);
