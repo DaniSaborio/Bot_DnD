@@ -40,9 +40,17 @@ Orden recomendado para la primera sesión: los dos hacen `/importar` con su PDF,
    - **Hoja oficial de 5e rellenable:** llenala en la compu y guardala.
 2. En el canal escribí `/importar`, elegí el campo **archivo** y adjuntá el PDF.
 
-El bot lee el texto del PDF (y los campos, si es una hoja rellenable) y la IA arma una ficha compacta: HP, CA, características, habilidades, salvaciones, ataques, conjuros, rasgos y equipo. Con eso:
-- el árbitro te pide tiradas con tu bonificador real (el bot lo verifica contra la ficha, por si el modelo se equivoca de número),
-- el DM conoce tus HP y CA y lleva la cuenta del daño durante la partida.
+El bot lee el texto del PDF (y los campos, si es una hoja rellenable) y guarda dos cosas:
+- **Los números exactos** (características, competencia, salvaciones, habilidades, ataques, CA, HP), que se usan para calcular cada tirada.
+- **Una ficha compacta en texto** (rasgos, conjuros, equipo), para el contexto.
+
+**Cómo se asegura de que los números estén bien:**
+1. Un **lector en código, sin IA**, saca los números directamente del texto del PDF: lee los campos de la hoja rellenable por su nombre, o busca el número al lado de cada habilidad y se queda con la lectura que cuadra con tus características y tu competencia. La IA solo completa lo que el código no encuentra.
+2. Si la IA leyó un número distinto, **manda lo que dice la ficha** y `/importar` te muestra qué corrigió.
+3. Si algún número no cuadra con *característica + competencia* (por ejemplo, por un objeto mágico), `/importar` te lo marca para que lo revises.
+4. Con `/ficha` ves **todos** los números que va a usar el bot, incluidos los que se calculan (por ejemplo, una habilidad sin competencia es solo el modificador).
+
+**En las tiradas la IA nunca pone el número.** El árbitro solo elige *qué* se tira (por ejemplo, Sigilo) y la CD; el bonificador lo calcula el código con tu ficha, y en cada tirada se muestra de dónde salió (*Sigilo +1: DES +1, sin competencia*).
 
 Cuando tu personaje cambie (subís de nivel, nuevo equipo), exportá el PDF otra vez y volvé a usar `/importar`. Con `/ficha` ves lo que leyó el bot. Si después usás `/unirse` para cambiar el nombre, la ficha se conserva.
 
@@ -67,7 +75,8 @@ DnD/
 ```
 
 **Podés editar en Obsidian** y el bot usa los cambios en el siguiente turno, sin reiniciarlo:
-- **Fichas** (`Personajes/*.md`): todo lo que esté debajo de `## Ficha` es lo que el DM sabe de ese personaje. Corregí HP, agregá un objeto mágico, lo que quieras.
+- **Números de la ficha** (`Personajes/*.md`, en las propiedades de arriba): `fue`, `des`… (puntuaciones), `competencia`, `ca`, `hp_max`, y las listas `salvaciones`, `habilidades` y `ataques` (ej. `Sigilo +7`, `Daga +5 · 1d4+3`). Son los que usa el bot para cada tirada: si algo está mal, corregilo ahí.
+- **Ficha en texto** (`Personajes/*.md`, debajo de `## Ficha`): rasgos, conjuros, equipo. Agregá un objeto mágico o lo que quieras.
 - **Resumen** (`Campaña.md`): lo que esté debajo de `## Resumen` es la memoria del DM. Podés agregar notas propias (NPCs, secretos, ganchos de trama).
 - **Historial**: se puede leer y releer como el diario de la partida. Si lo editás, no borres las marcas `<!-- msg N ... -->` (en modo lectura no se ven); son las que usa el bot para separar los turnos.
 
