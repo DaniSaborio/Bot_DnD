@@ -1,10 +1,22 @@
-import { Client, Events, GatewayIntentBits, MessageFlags, type ChatInputCommandInteraction } from "discord.js";
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Client,
+  Events,
+  GatewayIntentBits,
+  MessageFlags,
+  type ButtonInteraction,
+  type ChatInputCommandInteraction,
+} from "discord.js";
 import { splitMessage } from "./discord";
 import * as db from "./vault";
 import { rollDice } from "./dice";
 import { checkUrl } from "./nivel20";
 import { checkAttachment } from "./pdf";
-import { runTurn, askOoc, maybeCompact, importSheet, type GameEnv, type SheetSource } from "./game";
+import { runTurn, advance, resolveRoll, askOoc, maybeCompact, importSheet, quotaReport, type GameEnv, type SheetSource } from "./game";
+import { initQuota } from "./quota";
+import { warmUp, ollamaModel } from "./ollama";
 
 try {
   process.loadEnvFile();
@@ -15,7 +27,12 @@ try {
 const env: GameEnv = {
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   GEMINI_MODEL: process.env.GEMINI_MODEL,
+  GEMINI_LIGHT_MODEL: process.env.GEMINI_LIGHT_MODEL,
   GEMINI_THINKING: process.env.GEMINI_THINKING,
+  GEMINI_LIMITS: process.env.GEMINI_LIMITS,
+  OLLAMA_URL: process.env.OLLAMA_URL,
+  OLLAMA_MODEL: process.env.OLLAMA_MODEL,
+  OLLAMA_FALLBACK: process.env.OLLAMA_FALLBACK,
 };
 
 const NO_MENTIONS = { parse: [] };
@@ -24,41 +41,110 @@ function reply(i: ChatInputCommandInteraction, content: string, ephemeral = fals
   return i.reply({ content: content.slice(0, 2000), flags: ephemeral ? MessageFlags.Ephemeral : undefined, allowedMentions: NO_MENTIONS });
 }
 
+interface Out {
+  text: string;
+  rolls?: db.RollRequest[];
+}
+
+/** Botones para las tiradas que pidió el árbitro (Discord permite hasta 5 por fila). */
+function rollButtons(rolls: db.RollRequest[]) {
+  const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+  for (let k = 0; k < rolls.length && rows.length < 5; k += 5) {
+    rows.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        rolls.slice(k, k + 5).map((r) =>
+          new ButtonBuilder()
+            .setCustomId(`tirar:${r.id}`)
+            .setStyle(ButtonStyle.Primary)
+            .setLabel(`🎲 ${r.character}: ${r.tipo} (${r.dados})`.slice(0, 80)),
+        ),
+      ),
+    );
+  }
+  return rows;
+}
+
+function rollsMessage(rolls: db.RollRequest[]): string {
+  const lines = rolls.map((r) => `• **${r.character}** — ${r.tipo}${r.motivo ? ` (${r.motivo})` : ""}`);
+  return `⚖️ **Hace falta tirar:**\n${lines.join("\n")}\n-# Cada uno toca su botón (o usa /tirar). El DM narra cuando estén todas.`;
+}
+
+/** Envía el resultado: el primer trozo edita el "pensando...", el resto van como mensajes nuevos; los botones van al final. */
+async function send(i: ChatInputCommandInteraction | ButtonInteraction, out: Out, mode: "edit" | "followUp") {
+  const [first, ...rest] = splitMessage(out.text);
+  const chunks = [first, ...rest];
+  for (let k = 0; k < chunks.length; k++) {
+    const last = k === chunks.length - 1;
+    const payload = { content: chunks[k], allowedMentions: NO_MENTIONS, components: last && out.rolls?.length ? rollButtons(out.rolls) : [] };
+    if (k === 0 && mode === "edit") await i.editReply(payload);
+    else await i.followUp(payload);
+  }
+}
+
 /** Responde "pensando..." de inmediato (Discord exige respuesta en 3 s) y publica el resultado cuando esté listo. */
-async function deferAndRun(i: ChatInputCommandInteraction, work: () => Promise<string>, after?: () => Promise<void>) {
+async function deferAndRun(i: ChatInputCommandInteraction, work: () => Promise<string | Out>, after?: () => Promise<void>) {
   await i.deferReply();
-  let text: string;
+  let out: Out;
   try {
-    text = await work();
+    const r = await work();
+    out = typeof r === "string" ? { text: r } : r;
   } catch (e) {
     console.error(e);
-    text = `⚠️ El DM tuvo un problema: ${(e as Error).message}\nSus acciones siguen guardadas; prueben \`/narrar\`.`;
+    out = { text: `⚠️ El DM tuvo un problema: ${(e as Error).message}\nSus acciones siguen guardadas; prueben \`/narrar\`.` };
   }
-  const [first, ...rest] = splitMessage(text);
-  try {
-    await i.editReply({ content: first, allowedMentions: NO_MENTIONS });
-    for (const chunk of rest) await i.followUp({ content: chunk, allowedMentions: NO_MENTIONS });
-  } catch (e) {
-    console.error("No se pudo publicar en Discord", e);
-  }
+  await send(i, out, "edit").catch((e) => console.error("No se pudo publicar en Discord", e));
   if (after) await after().catch((e) => console.error("compactación", e));
 }
 
-/** Si todos los jugadores ya actuaron, dispara la narración; si no, avisa a quién se espera. */
+/** El árbitro decide si hacen falta tiradas; si no, el DM narra. */
+async function advanceTurn(ch: string, header: string): Promise<Out> {
+  const r = await advance(env, ch);
+  if (r.kind === "rolls") return { text: `${header}\n\n${rollsMessage(r.rolls)}`, rolls: r.rolls };
+  return { text: `${header}\n\n${r.text}` };
+}
+
+/** Si todos los jugadores ya actuaron, pasa al árbitro; si no, avisa a quién se espera. */
 async function registerAndMaybeNarrate(i: ChatInputCommandInteraction, ch: string, userId: string, line: string, header: string) {
   await db.addPending(ch, userId, line);
-  const [players, pending] = await Promise.all([db.getPlayers(ch), db.getPending(ch)]);
+  const [players, pending, rolls] = await Promise.all([db.getPlayers(ch), db.getPending(ch), db.getRollRequests(ch)]);
+  if (rolls.length) {
+    return reply(i, `${header}\n-# Esperando las tiradas de: ${rolls.map((r) => r.character).join(", ")} · o usen /narrar`);
+  }
   const acted = new Set(pending.map((p) => p.user_id));
   const waiting = players.filter((p) => !acted.has(p.user_id));
-
   if (waiting.length > 0) {
     return reply(i, `${header}\n-# Esperando a: ${waiting.map((p) => p.character).join(", ")} · o usen /narrar`);
   }
   return deferAndRun(
     i,
-    async () => `${header}\n\n${await runTurn(env, ch)}`,
+    () => advanceTurn(ch, header),
     () => maybeCompact(env, ch),
   );
+}
+
+/** Botón 🎲 de una tirada pedida por el árbitro. Cuando se hace la última, el DM narra. */
+async function handleRollButton(i: ButtonInteraction) {
+  const ch = i.channelId;
+  const id = Number(i.customId.split(":")[1]);
+  const req = (await db.getRollRequests(ch)).find((r) => r.id === id);
+  if (!req) return i.reply({ content: "Esa tirada ya no está pendiente.", flags: MessageFlags.Ephemeral });
+  if (req.user_id !== i.user.id) return i.reply({ content: `Esa tirada es de **${req.character}**.`, flags: MessageFlags.Ephemeral });
+
+  const out = await resolveRoll(ch, i.user.id, { rollId: id });
+  if (!out) return i.reply({ content: "Esa tirada ya se hizo.", flags: MessageFlags.Ephemeral });
+  await i.update({ content: `${i.message.content}\n${out.display}`.slice(0, 2000), components: rollButtons(out.remaining), allowedMentions: NO_MENTIONS });
+  if (out.remaining.length) return;
+
+  if (i.channel && "sendTyping" in i.channel) await i.channel.sendTyping().catch(() => {});
+  let text: string;
+  try {
+    text = await runTurn(env, ch);
+  } catch (e) {
+    console.error(e);
+    text = `⚠️ El DM tuvo un problema: ${(e as Error).message}\nLas tiradas quedaron guardadas; prueben \`/narrar\`.`;
+  }
+  await send(i, { text }, "followUp").catch((e) => console.error("No se pudo publicar en Discord", e));
+  await maybeCompact(env, ch).catch((e) => console.error("compactación", e));
 }
 
 async function handleCommand(i: ChatInputCommandInteraction) {
@@ -156,6 +242,19 @@ async function handleCommand(i: ChatInputCommandInteraction) {
 
       const camp = await db.getCampaign(ch);
       if (!camp || !player) return reply(i, header);
+
+      // Si el árbitro le había pedido una tirada a este jugador, este resultado la resuelve.
+      if ((await db.getRollRequests(ch)).some((r) => r.user_id === userId)) {
+        const out = await resolveRoll(ch, userId, { manual: result, expr: dice });
+        if (out && !out.remaining.length) {
+          return deferAndRun(
+            i,
+            async () => `${out.display}\n\n${await runTurn(env, ch)}`,
+            () => maybeCompact(env, ch),
+          );
+        }
+        if (out) return reply(i, `${out.display}\n-# Esperando las tiradas de: ${out.remaining.map((r) => r.character).join(", ")}`);
+      }
       const line = `${player.character} tira ${dice}: ${result.detail.replace(/~~/g, "")} = ${result.total}${result.note ? ` (${result.note})` : ""}`;
       return registerAndMaybeNarrate(i, ch, userId, line, header);
     }
@@ -174,15 +273,19 @@ async function handleCommand(i: ChatInputCommandInteraction) {
       return deferAndRun(i, async () => `💬 **${who}** (fuera de personaje): ${question}\n\n${await askOoc(env, ch, who, question)}`);
     }
 
+    case "cuota":
+      return reply(i, quotaReport(env), true);
+
     case "estado": {
       const camp = await db.getCampaign(ch);
       if (!camp) return reply(i, "No hay campaña en este canal. Empiecen con `/campaña`.", true);
-      const [players, pending] = await Promise.all([db.getPlayers(ch), db.getPending(ch)]);
+      const [players, pending, rolls] = await Promise.all([db.getPlayers(ch), db.getPending(ch), db.getRollRequests(ch)]);
       const lines = [
         `📜 **${camp.setting}** · *${camp.tone}*`,
         `**Personajes:** ${players.length ? players.map((p) => p.character).join(", ") : "nadie todavía"}`,
         `**Acciones pendientes:** ${pending.length ? "\n" + pending.map((p) => `• ${p.content}`).join("\n") : "ninguna"}`,
       ];
+      if (rolls.length) lines.push(`**Tiradas por hacer:** ${rolls.map((r) => `${r.character} (${r.tipo})`).join(", ")}`);
       if (camp.summary) lines.push(`**Resumen:**\n${camp.summary}`);
       return reply(i, lines.join("\n"), true);
     }
@@ -199,13 +302,15 @@ async function main() {
   if (!env.GEMINI_API_KEY) throw new Error("Falta GEMINI_API_KEY en .env");
 
   const folder = await db.initVault(OBSIDIAN_VAULT, OBSIDIAN_FOLDER || "DnD");
+  await initQuota(folder);
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
   client.once(Events.ClientReady, (c) => console.log(`🎲 DM bot conectado como ${c.user.tag} · campañas en ${folder}`));
   client.on(Events.InteractionCreate, async (i) => {
-    if (!i.isChatInputCommand()) return;
+    if (!i.isChatInputCommand() && !(i.isButton() && i.customId.startsWith("tirar:"))) return;
     try {
-      await handleCommand(i);
+      if (i.isButton()) await handleRollButton(i);
+      else await handleCommand(i);
     } catch (e) {
       console.error(e);
       const content = `⚠️ Error: ${(e as Error).message}`.slice(0, 2000);
@@ -214,6 +319,9 @@ async function main() {
     }
   });
 
+  warmUp(env).then((ok) =>
+    console.log(ok ? `🧠 Árbitro local listo (${ollamaModel(env)})` : `⚠️ Ollama no responde: el árbitro usará Gemini liviano. Arrancalo con: systemctl --user start ollama`),
+  );
   await client.login(DISCORD_TOKEN);
 }
 

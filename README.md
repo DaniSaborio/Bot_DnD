@@ -1,6 +1,6 @@
 # 🎲 DnD DM Bot
 
-Bot de Discord que hace de Dungeon Master usando la API de **Google Gemini** (tiene capa gratuita). Corre en tu propia computadora y guarda todo en tu **bóveda de Obsidian**: campañas, personajes, fichas e historial quedan como notas Markdown que podés leer y editar. Cada canal de Discord es una campaña independiente.
+Bot de Discord que hace de Dungeon Master, **100% gratis**: **Google Gemini** narra la historia (capa gratuita) y un modelo local con **Ollama** hace de árbitro de reglas y decide las tiradas. Corre en tu propia computadora y guarda todo en tu **bóveda de Obsidian**: campañas, personajes, fichas e historial quedan como notas Markdown que podés leer y editar. Cada canal de Discord es una campaña independiente.
 
 ## Cómo se juega
 
@@ -11,15 +11,22 @@ Bot de Discord que hace de Dungeon Master usando la API de **Google Gemini** (ti
 | `/ficha [jugador]` | Ver tu ficha o la de otro jugador (solo la ves vos) |
 | `/campaña ambientacion tono` | Empieza una campaña nueva y el DM narra la escena inicial. La anterior del canal se mueve a `Archivo/` en Obsidian |
 | `/accion texto` | Declarás lo que hace tu personaje |
-| `/tirar dados` | Tira dados: `1d20+5`, `2d20kh1` (ventaja), `2d20kl1` (desventaja), `4d6kh3`, `8d6` |
+| `/tirar dados` | Tira dados a mano: `1d20+5`, `2d20kh1` (ventaja), `2d20kl1` (desventaja), `4d6kh3`, `8d6` |
 | `/narrar` | El DM continúa sin esperar a todos |
 | `/ooc pregunta` | Pregunta fuera de personaje (reglas, dudas); no afecta la historia |
 | `/estado` | Ver personajes, acciones pendientes y el resumen (solo lo ves vos) |
+| `/cuota` | Ver cuánta IA gratis se usó hoy, cuánto queda y a qué hora se recarga |
 | `/salir` | Saca a tu personaje de la mesa |
 
-**Turnos:** el DM espera a que **todos** los jugadores hagan una `/accion` o `/tirar`, y entonces narra. Si alguien no tiene nada que hacer, usen `/narrar`.
+**Turnos:**
+1. Cada jugador declara lo que hace con `/accion`.
+2. Cuando **todos** actuaron, el **árbitro** mira las fichas y la escena y decide si alguna acción necesita tirada (ej. *Kael: Atletismo, CD 15*). Si hace falta, aparece un botón **🎲** para cada uno, con el bonificador de su ficha.
+3. Cada uno toca su botón: el bot tira, compara con la CD y, si es un ataque que pega, tira también el daño (doble en un 20 natural).
+4. Con todos los resultados, el DM narra **una sola vez** lo que pasó.
 
-**Dados:** las tiradas son reales y el DM respeta el resultado. Cuando el DM pida una prueba, tirá con `/tirar 1d20+tu_modificador`.
+Si el árbitro no pide tiradas, el DM narra directamente. Si alguien no tiene nada que hacer, o no quieren esperar una tirada, usen `/narrar`.
+
+**Dados:** las tiradas son reales y el DM respeta el resultado. La CD se decide *antes* de tirar, así que no se puede acomodar. Si preferís tirar a mano, `/tirar` también resuelve la tirada que te pidió el árbitro.
 
 **Memoria:** cuando la historia crece, el bot resume lo más viejo automáticamente (historia, estado de personajes, NPCs, misiones), así la campaña puede durar meses sin perder el hilo.
 
@@ -33,10 +40,9 @@ Orden recomendado para la primera sesión: los dos hacen `/importar` con su PDF,
    - **Hoja oficial de 5e rellenable:** llenala en la compu y guardala.
 2. En el canal escribí `/importar`, elegí el campo **archivo** y adjuntá el PDF.
 
-El bot lee el texto del PDF (y los campos, si es una hoja rellenable) y la IA arma una ficha compacta: HP, CA, características, habilidades, salvaciones, ataques, conjuros, rasgos y equipo. Con eso el DM:
-- te pide tiradas con tu bonificador real (`/tirar 1d20+7` para Atletismo),
-- respeta tus HP, CA, ataques y espacios de conjuro, y lleva la cuenta durante la partida,
-- te avisa si intentás usar algo que no está en tu ficha.
+El bot lee el texto del PDF (y los campos, si es una hoja rellenable) y la IA arma una ficha compacta: HP, CA, características, habilidades, salvaciones, ataques, conjuros, rasgos y equipo. Con eso:
+- el árbitro te pide tiradas con tu bonificador real (el bot lo verifica contra la ficha, por si el modelo se equivoca de número),
+- el DM conoce tus HP y CA y lleva la cuenta del daño durante la partida.
 
 Cuando tu personaje cambie (subís de nivel, nuevo equipo), exportá el PDF otra vez y volvé a usar `/importar`. Con `/ficha` ves lo que leyó el bot. Si después usás `/unirse` para cambiar el nombre, la ficha se conserva.
 
@@ -53,7 +59,7 @@ DnD/
 └── campaña-brumas (123456789012345678)/
     ├── Campaña.md        ambientación, tono y resumen de lo ocurrido
     ├── Historial.md      todos los turnos: acciones de los jugadores y narraciones del DM
-    ├── Pendientes.md     acciones declaradas que el DM todavía no narró
+    ├── Pendientes.md     acciones declaradas y tiradas pedidas que el DM todavía no narró
     ├── Personajes/
     │   ├── Kael.md       ficha de cada personaje
     │   └── Lyra.md
@@ -73,6 +79,7 @@ Cuando el historial crece, el bot resume lo más viejo en `Campaña.md` y le man
 
 Requisitos:
 - **Node.js 20.12 o superior** (en Arch/Garuda: `sudo pacman -S nodejs npm`; en Windows/macOS: https://nodejs.org, versión LTS).
+- **Ollama** para el árbitro local (en Arch/Garuda con placa NVIDIA: `sudo pacman -S ollama-cuda`; en otros sistemas: https://ollama.com/download). Funciona bien con una placa de 4 GB. Si no lo instalás, el árbitro usa el modelo liviano de Gemini, que también es gratis pero gasta cuota.
 - **Obsidian** con una bóveda creada.
 - Una cuenta de Discord y un servidor donde seas dueño o admin.
 - Una API key de Gemini: entrá a https://aistudio.google.com/apikey con tu cuenta de Google → **Create API key**. **No actives la facturación** ("Set up billing") en ese proyecto: así Google nunca puede cobrarte, y cuando se acaba la cuota gratuita el bot simplemente avisa y espera.
@@ -112,17 +119,46 @@ Abrí `.env` y completá:
 
 Para encontrar la ruta de la bóveda en Obsidian: menú de bóvedas (abajo a la izquierda) → **Administrar bóvedas** → clic derecho → *Mostrar en el explorador*.
 
-### 4. Registrar los comandos
+### 4. Preparar el árbitro local (Ollama)
+```bash
+ollama pull gemma4:e4b
+```
+Para que Ollama arranque solo al iniciar sesión, con las optimizaciones para placas de video chicas, creá `~/.config/systemd/user/ollama.service`:
+```ini
+[Unit]
+Description=Ollama (árbitro local del DM bot)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ollama serve
+Environment=OLLAMA_FLASH_ATTENTION=1
+Environment=OLLAMA_KV_CACHE_TYPE=q8_0
+Environment=OLLAMA_CONTEXT_LENGTH=8192
+Environment=OLLAMA_KEEP_ALIVE=-1
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ollama
+```
+Si además está activo el servicio del sistema (`sudo systemctl status ollama`), desactivalo con `sudo systemctl disable --now ollama`, porque los dos usan el mismo puerto.
+
+**Por qué `gemma4:e4b`:** en una RTX 3050 de 4 GB fue el más rápido (~3 s por decisión) y el que mejor eligió las tiradas, comparado con `qwen3.5:4b` y `gemma3:4b`. Para probar otro, cambiá `OLLAMA_MODEL` en `.env`.
+
+### 5. Registrar los comandos
 ```bash
 npm run register
 ```
-Tiene que responder `✅ 10 comandos registrados en el servidor`. Solo hace falta la primera vez (o si cambian los comandos).
+Tiene que responder `✅ 11 comandos registrados en el servidor`. Solo hace falta la primera vez (o si cambian los comandos).
 
-### 5. Arrancar
+### 6. Arrancar
 ```bash
 npm start
 ```
-Tiene que decir `🎲 DM bot conectado como ... · campañas en ...`. Dejá esa terminal abierta mientras jueguen. En Discord, creá un canal tipo `#campaña-brumas`, escribí `/` y deberían aparecer los comandos.
+Tiene que decir `🎲 DM bot conectado como ... · campañas en ...` y `🧠 Árbitro local listo (gemma4:e4b)`. Dejá esa terminal abierta mientras jueguen. En Discord, creá un canal tipo `#campaña-brumas`, escribí `/` y deberían aparecer los comandos.
 
 ### Dejarlo corriendo siempre (Linux)
 Con un servicio de usuario de systemd arranca solo al iniciar sesión y se reinicia si falla. Creá `~/.config/systemd/user/dnd-dm-bot.service` (cambiá las rutas):
@@ -159,7 +195,9 @@ Las campañas guardadas en D1 no se migran solas. Pasos: en el portal de Discord
 | `npm run register` → `403 Missing Access (50001)` | El bot no está en ese servidor o el `DISCORD_GUILD_ID` es de otro servidor. Invitalo (paso 2) y verificá el ID. |
 | Los comandos no aparecen | Registralos con `DISCORD_GUILD_ID` puesto. Probá también reiniciar Discord (Ctrl+R). |
 | `process.loadEnvFile is not a function` | Node es muy viejo: instalá la versión 20.12 o superior. |
-| "Se acabó la cuota gratuita de Gemini en todos los modelos" | Se usó la cuota de los tres modelos. Si fue la de por minuto, esperen un minuto; si fue la diaria, se reinicia a medianoche hora del Pacífico (01:00 en Costa Rica). Ver tus límites en https://aistudio.google.com/rate-limit. |
+| "Se acabó la cuota gratuita de Gemini" | Se usó la cuota de los tres modelos. Si Ollama está corriendo, el modelo local sigue narrando (más lento y algo peor). Si fue la cuota por minuto, esperen un minuto; si fue la diaria, se reinicia a medianoche hora del Pacífico (01:00 en Costa Rica; 02:00 de noviembre a marzo). `/cuota` muestra la hora exacta. |
+| `⚠️ Ollama no responde` al arrancar | Ollama no está corriendo: `systemctl --user start ollama`. Mientras tanto el árbitro usa Gemini liviano. |
+| El árbitro pide tiradas raras | Es un modelo chico: puede equivocarse de habilidad (el bonificador sí se corrige con la ficha). Usen `/narrar` para seguir sin tirar. |
 | "Gemini bloqueó la respuesta" | Los filtros de seguridad de Google frenaron la escena. Reformulen la acción o pidan al DM que siga con `/narrar`. |
 | `/importar` dice que el PDF no tiene texto | Es una foto o un escaneo. Exportá la ficha como PDF desde Nivel20, D&D Beyond o la hoja rellenable. |
 | `/importar` con enlace falla | La ficha debe ser visible con el enlace de **Compartir** de Nivel20; si igual falla, usá el PDF. `/unirse` funciona sin ficha. |
@@ -167,22 +205,32 @@ Las campañas guardadas en D1 no se migran solas. Pasos: en el portal de Discord
 ## Configuración
 
 Todo en `.env` (reiniciá el bot después de cambiarlo):
-- **Modelos:** `GEMINI_MODEL`, una lista separada por comas. El bot usa el primero y, si se le acaba la cuota gratuita, pasa al siguiente (cada modelo tiene su propia cuota). Por defecto: `gemini-3.8-flash` (narra mejor), luego `gemini-3.5-flash-lite` y `gemini-3.1-flash-lite`.
+- **Narrador:** `GEMINI_MODEL`, una lista separada por comas. El bot usa el primero y, si se le acaba la cuota gratuita, pasa al siguiente (cada modelo tiene su propia cuota). Por defecto: `gemini-3.8-flash` (narra mejor), luego `gemini-3.5-flash-lite` y `gemini-3.1-flash-lite`. Si se acaban todos, narra Ollama (se desactiva con `OLLAMA_FALLBACK=false`).
+- **Tareas livianas:** `GEMINI_LIGHT_MODEL` (resúmenes, `/ooc`, `/importar`), para que no gasten la cuota del narrador.
+- **Árbitro:** `OLLAMA_MODEL` (por defecto `gemma4:e4b`).
+- **Límites de tu cuenta:** `GEMINI_LIMITS`, con los RPD de https://aistudio.google.com/rate-limit, para que `/cuota` diga cuántas horas de juego quedan.
 - **Razonamiento:** `GEMINI_THINKING` (`low`, `medium`, `high`). Más alto puede mejorar combates complejos, pero tarda más y gasta más cuota.
 - **Carpeta en la bóveda:** `OBSIDIAN_FOLDER` (por defecto `DnD`).
 
 En el código:
 - **Personalidad del DM:** `src/prompts.ts`.
-- **Largo de la memoria:** `COMPACT_AFTER` y `COMPACT_CHUNK` en `src/game.ts`.
+- **Largo de la memoria:** `COMPACT_AFTER` y `KEEP_RECENT` en `src/game.ts`.
+- **Prompt del árbitro:** `ARBITER_SYSTEM` en `src/prompts.ts`.
 - **Filtros de seguridad:** `SAFETY_SETTINGS` en `src/ai.ts` (por defecto solo bloquea contenido claramente dañino, para permitir combates y villanos).
 
 ## Cómo funciona
 
 ```
 Discord ◀──(gateway)──▶ bot en tu PC (Node + discord.js) ──▶ bóveda de Obsidian (notas .md)
-                                    │
-                                    └──▶ API de Gemini ──▶ narración ──▶ Discord
+                              │
+          acciones ──▶ árbitro local (Ollama) ──▶ botones 🎲 ──▶ tiradas reales
+                              │
+                              └──▶ Gemini (narrador) ──▶ narración ──▶ Discord
 ```
+
+Cada IA ve solo lo que necesita:
+- **Árbitro (Ollama):** las fichas completas, la última escena y las acciones nuevas. No gasta nada de Gemini.
+- **Narrador (Gemini):** el resumen, los turnos recientes, el nombre, HP y CA de cada personaje, y los resultados de las tiradas. Sin las fichas completas, el pedido es más chico.
 
 - Discord exige respuesta en 3 s, así que el bot responde "pensando…" y publica la narración cuando Gemini termina.
 - Las notas se leen del disco en cada comando, así que lo que edites en Obsidian se usa enseguida.
@@ -191,9 +239,13 @@ Discord ◀──(gateway)──▶ bot en tu PC (Node + discord.js) ──▶ b
 
 ## ¿Cuánto podemos jugar gratis?
 
-Cada narración del DM, `/ooc`, `/importar` y cada resumen automático (uno cada ~10 turnos) es **un pedido** a Gemini; `/accion` y `/tirar` sin narración no gastan nada. Una sesión de 3 horas son unos **100 pedidos**. Compará eso con el límite de pedidos por día de cada modelo en https://aistudio.google.com/rate-limit: como el bot salta al siguiente modelo cuando se agota uno, la cuota diaria total es la suma de los tres.
+- Cada **narración** es un pedido al narrador (`gemini-3.8-flash`). Con 2 jugadores son unas **35 por hora**.
+- Los **resúmenes** automáticos (uno cada ~5 turnos), `/ooc` e `/importar` usan el modelo liviano, que tiene su propia cuota.
+- El **árbitro** corre en tu compu: no gasta nada. `/accion` y las tiradas tampoco.
 
-En la consola el bot muestra los tokens y el modelo de cada pedido, para ver el consumo real.
+Horas de juego con el mejor narrador ≈ RPD de `gemini-3.8-flash` ÷ 35. Por ejemplo, con 250 pedidos por día son unas 7 horas. Después sigue narrando con los modelos *lite* y, si se acaban todos, con Ollama, así que la partida no se corta.
+
+`/cuota` muestra lo usado hoy y, si ponés tus límites en `GEMINI_LIMITS`, cuánto queda.
 
 ## Límites conocidos
 
@@ -205,5 +257,6 @@ En la consola el bot muestra los tokens y el modelo de cada pedido, para ver el 
 ## Desarrollo
 ```bash
 npm run dev         # reinicia el bot al guardar cambios
+npm test            # pruebas (sin red: Gemini y Ollama se simulan)
 npm run typecheck
 ```

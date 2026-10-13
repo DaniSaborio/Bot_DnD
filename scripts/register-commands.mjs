@@ -57,6 +57,7 @@ const commands = [
     options: [{ type: STRING, name: "pregunta", description: "Tu pregunta", required: true }],
   },
   { name: "estado", description: "Ver personajes, acciones pendientes y resumen de la campaña" },
+  { name: "cuota", description: "Ver cuánta IA gratis se usó hoy y cuánto queda" },
 ];
 
 const { DISCORD_APP_ID, DISCORD_GUILD_ID } = process.env;

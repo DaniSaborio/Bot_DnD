@@ -10,7 +10,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "register": "node scripts/register-commands.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "discord.js": "^14.0.0",

@@ -35,6 +35,16 @@ export interface Pending {
   user_id: string;
   content: string;
 }
+export interface RollRequest {
+  id: number;
+  user_id: string;
+  character: string;
+  tipo: string;
+  dados: string;
+  cd: number;
+  dano: string;
+  motivo: string;
+}
 
 const CAMPAIGN_FILE = "Campaña.md";
 const HISTORY_FILE = "Historial.md";
@@ -46,6 +56,7 @@ const SHEET_HEADING = "## Ficha";
 
 const MSG_MARK = /^<!-- msg (\d+) (user|assistant) -->$/gm;
 const PENDING_LINE = /^- \[.\] (.*?) <!-- pend (\d+) (\S+) -->$/;
+const ROLL_LINE = /<!-- tirada (\{.*\}) -->$/;
 
 let root = "";
 
@@ -264,36 +275,89 @@ export function removePlayer(ch: string, userId: string): Promise<void> {
   });
 }
 
-// ---------- acciones pendientes ----------
+// ---------- acciones pendientes y tiradas pedidas por el árbitro ----------
 
-async function readPendingFile(ch: string): Promise<Pending[]> {
-  const dir = await findChannelDir(ch);
-  if (!dir) return [];
-  const text = (await readFile(path.join(dir, PENDING_FILE))) ?? "";
-  const out: Pending[] = [];
-  for (const line of text.split("\n")) {
-    const m = PENDING_LINE.exec(line.trim());
-    if (m) out.push({ id: Number(m[2]), user_id: m[3], content: m[1] });
-  }
-  return out.sort((a, b) => a.id - b.id);
+interface PendingState {
+  actions: Pending[];
+  rolls: RollRequest[];
 }
 
-async function writePendingFile(ch: string, list: Pending[]) {
+async function readPendingState(ch: string): Promise<PendingState> {
+  const dir = await findChannelDir(ch);
+  const state: PendingState = { actions: [], rolls: [] };
+  if (!dir) return state;
+  const text = (await readFile(path.join(dir, PENDING_FILE))) ?? "";
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const m = PENDING_LINE.exec(line);
+    if (m) {
+      state.actions.push({ id: Number(m[2]), user_id: m[3], content: m[1] });
+      continue;
+    }
+    const r = ROLL_LINE.exec(line);
+    if (r) {
+      try {
+        state.rolls.push(JSON.parse(r[1]) as RollRequest);
+      } catch {
+        // línea editada a mano y rota: se ignora
+      }
+    }
+  }
+  state.actions.sort((x, y) => x.id - y.id);
+  return state;
+}
+
+async function writePendingState(ch: string, state: PendingState) {
   const dir = await channelDir(ch);
-  const lines = list.map((p) => `- [ ] ${p.content} <!-- pend ${p.id} ${p.user_id} -->`);
-  await writeFile(path.join(dir, PENDING_FILE), `# Acciones pendientes\n\nEl DM las narra cuando todos actuaron o alguien usa /narrar.\n\n${lines.join("\n")}\n`);
+  const actions = state.actions.map((p) => `- [ ] ${p.content} <!-- pend ${p.id} ${p.user_id} -->`);
+  // El JSON va dentro de un comentario (invisible en Obsidian); "--" no puede aparecer adentro.
+  const rolls = state.rolls.map((r) => `- [ ] 🎲 ${r.character}: ${r.tipo} (${r.dados}) — ${r.motivo} <!-- tirada ${JSON.stringify(r).replace(/--/g, "- -")} -->`);
+  const rollsBlock = rolls.length ? `\n\n## Tiradas que pidió el árbitro\n\n${rolls.join("\n")}` : "";
+  await writeFile(
+    path.join(dir, PENDING_FILE),
+    `# Acciones pendientes\n\nEl DM las narra cuando todos actuaron (y tiraron lo que pidió el árbitro) o alguien usa /narrar.\n\n${actions.join("\n")}${rollsBlock}\n`,
+  );
 }
 
 export function addPending(ch: string, userId: string, content: string): Promise<void> {
   return serialize(ch, async () => {
-    const list = await readPendingFile(ch);
-    const id = list.reduce((max, p) => Math.max(max, p.id), 0) + 1;
-    list.push({ id, user_id: userId, content: content.replace(/\s*\n\s*/g, " ") });
-    await writePendingFile(ch, list);
+    const state = await readPendingState(ch);
+    const id = state.actions.reduce((max, p) => Math.max(max, p.id), 0) + 1;
+    state.actions.push({ id, user_id: userId, content: content.replace(/\s*\n\s*/g, " ") });
+    await writePendingState(ch, state);
   });
 }
 
-export const getPending = readPendingFile;
+export async function getPending(ch: string): Promise<Pending[]> {
+  return (await readPendingState(ch)).actions;
+}
+
+export async function getRollRequests(ch: string): Promise<RollRequest[]> {
+  return (await readPendingState(ch)).rolls;
+}
+
+/** Guarda las tiradas que pidió el árbitro (reemplaza las anteriores) y les asigna un id. */
+export function setRollRequests(ch: string, rolls: Omit<RollRequest, "id">[]): Promise<RollRequest[]> {
+  return serialize(ch, async () => {
+    const state = await readPendingState(ch);
+    const base = Date.now() % 1_000_000_000;
+    state.rolls = rolls.map((r, i) => ({ ...r, id: base + i }));
+    await writePendingState(ch, state);
+    return state.rolls;
+  });
+}
+
+/** Saca una tirada pedida (al tirarla). Devuelve null si ya no estaba, por ejemplo por un doble clic. */
+export function takeRollRequest(ch: string, match: (r: RollRequest) => boolean): Promise<{ taken: RollRequest; remaining: RollRequest[] } | null> {
+  return serialize(ch, async () => {
+    const state = await readPendingState(ch);
+    const taken = state.rolls.find(match);
+    if (!taken) return null;
+    state.rolls = state.rolls.filter((r) => r !== taken);
+    await writePendingState(ch, state);
+    return { taken, remaining: state.rolls };
+  });
+}
 
 // ---------- historial ----------
 
@@ -334,7 +398,9 @@ export function commitTurn(ch: string, userBlock: string, narration: string, max
       `\n<!-- msg ${id + 1} assistant -->\n**📜 DM** · ${when}\n\n${narration.trim()}\n\n---\n`;
     const current = (await readFile(file)) ?? "# Historial\n\n";
     await writeFile(file, current.replace(/\n*$/, "\n") + entry);
-    await writePendingFile(ch, (await readPendingFile(ch)).filter((p) => p.id > maxPendingId));
+    // Las tiradas pedidas que nadie hizo se descartan: la narración ya avanzó.
+    const state = await readPendingState(ch);
+    await writePendingState(ch, { actions: state.actions.filter((p) => p.id > maxPendingId), rolls: [] });
   });
 }
 
