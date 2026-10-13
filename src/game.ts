@@ -1,12 +1,10 @@
-import * as db from "./db";
+import * as db from "./vault";
 import { callAI, type AIEnv } from "./ai";
 import { dmSystemPrompt, oocSystemPrompt, SUMMARY_SYSTEM, SHEET_SYSTEM } from "./prompts";
 import { fetchNivel20Sheet } from "./nivel20";
 import { fetchPdfText, type DiscordAttachment } from "./pdf";
 
-export interface GameEnv extends AIEnv {
-  DB: D1Database;
-}
+export type GameEnv = AIEnv;
 
 const NARRATION_TOKENS = 900;
 const COMPACT_AFTER = 30; // mensajes guardados antes de resumir
@@ -14,12 +12,12 @@ const COMPACT_CHUNK = 20; // cuántos de los más viejos se resumen
 
 /** Toma las acciones pendientes, le pide la narración a la IA y guarda el turno. */
 export async function runTurn(env: GameEnv, ch: string, instruction?: string): Promise<string> {
-  const camp = await db.getCampaign(env.DB, ch);
+  const camp = await db.getCampaign(ch);
   if (!camp) return "No hay campaña en este canal. Empiecen una con `/campaña`.";
-  if (!(await db.tryLock(env.DB, ch))) return "⏳ El DM ya está narrando; esperen un momento.";
+  if (!(await db.tryLock(ch))) return "⏳ El DM ya está narrando; esperen un momento.";
 
   try {
-    const [pending, players, history] = await Promise.all([db.getPending(env.DB, ch), db.getPlayers(env.DB, ch), db.getMessages(env.DB, ch)]);
+    const [pending, players, history] = await Promise.all([db.getPending(ch), db.getPlayers(ch), db.getMessages(ch)]);
 
     const lines = pending.map((p) => p.content);
     if (!lines.length && !instruction) lines.push("(Los jugadores no declaran acciones nuevas. Continuá la escena.)");
@@ -34,18 +32,18 @@ export async function runTurn(env: GameEnv, ch: string, instruction?: string): P
     );
 
     const maxId = pending.length ? pending[pending.length - 1].id : 0;
-    await db.commitTurn(env.DB, ch, userBlock, narration, maxId);
+    await db.commitTurn(ch, userBlock, narration, maxId);
     return narration;
   } finally {
-    await db.unlock(env.DB, ch);
+    await db.unlock(ch);
   }
 }
 
 /** Pregunta fuera de personaje: usa el contexto pero no se guarda en la historia. */
 export async function askOoc(env: GameEnv, ch: string, character: string, question: string): Promise<string> {
-  const camp = await db.getCampaign(env.DB, ch);
+  const camp = await db.getCampaign(ch);
   if (!camp) return "No hay campaña en este canal. Empiecen una con `/campaña`.";
-  const [players, history] = await Promise.all([db.getPlayers(env.DB, ch), db.getMessages(env.DB, ch)]);
+  const [players, history] = await Promise.all([db.getPlayers(ch), db.getMessages(ch)]);
   const recent = history.slice(-6).map((m) => ({ role: m.role, content: m.content }));
   return callAI(env, oocSystemPrompt(camp, players), [...recent, { role: "user", content: `[Fuera de personaje] ${character} pregunta: ${question}` }], 600);
 }
@@ -94,15 +92,15 @@ export async function importSheet(env: GameEnv, ch: string, userId: string, sour
   const sheet = String(data.ficha ?? "").trim().slice(0, 2000);
   if (!character || !sheet) throw new Error("La ficha llegó incompleta; revisá que sea la ficha de tu personaje");
 
-  await db.savePlayerSheet(env.DB, ch, userId, character, description, sheet, origin);
+  await db.savePlayerSheet(ch, userId, character, description, sheet, origin);
   return { character, description, sheet, url: origin };
 }
 
 /** Cuando la historia crece, resume los mensajes más viejos en el resumen de la campaña. */
 export async function maybeCompact(env: GameEnv, ch: string): Promise<void> {
-  const history = await db.getMessages(env.DB, ch);
+  const history = await db.getMessages(ch);
   if (history.length <= COMPACT_AFTER) return;
-  if (!(await db.tryLock(env.DB, ch))) return;
+  if (!(await db.tryLock(ch))) return;
 
   try {
     const old = history.slice(0, COMPACT_CHUNK);
@@ -110,7 +108,7 @@ export async function maybeCompact(env: GameEnv, ch: string): Promise<void> {
     while (old.length && old[old.length - 1].role !== "assistant") old.pop();
     if (!old.length) return;
 
-    const camp = await db.getCampaign(env.DB, ch);
+    const camp = await db.getCampaign(ch);
     if (!camp) return;
     const transcript = old.map((m) => `${m.role === "user" ? "JUGADORES" : "DM"}: ${m.content}`).join("\n\n");
     const summary = await callAI(
@@ -119,8 +117,8 @@ export async function maybeCompact(env: GameEnv, ch: string): Promise<void> {
       [{ role: "user", content: `RESUMEN PREVIO:\n${camp.summary || "(vacío)"}\n\nEVENTOS NUEVOS:\n${transcript}` }],
       1200,
     );
-    await db.applyCompaction(env.DB, ch, summary, old[old.length - 1].id);
+    await db.applyCompaction(ch, summary, old[old.length - 1].id);
   } finally {
-    await db.unlock(env.DB, ch);
+    await db.unlock(ch);
   }
 }

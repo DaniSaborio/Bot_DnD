@@ -1,6 +1,10 @@
 // Registra los comandos slash en Discord.
-// Uso: DISCORD_APP_ID=... DISCORD_BOT_TOKEN=... [DISCORD_GUILD_ID=...] node scripts/register-commands.mjs
+// Uso: npm run register (lee DISCORD_APP_ID, DISCORD_TOKEN y DISCORD_GUILD_ID del archivo .env)
 // Con DISCORD_GUILD_ID los comandos aparecen al instante en ese servidor; sin él son globales (pueden tardar en aparecer).
+
+try {
+  process.loadEnvFile();
+} catch {}
 
 const STRING = 3;
 const USER = 6;
@@ -30,7 +34,7 @@ const commands = [
   { name: "salir", description: "Sacar a tu personaje de la campaña" },
   {
     name: "campaña",
-    description: "Empezar una campaña nueva en este canal (borra la anterior)",
+    description: "Empezar una campaña nueva en este canal (archiva la anterior)",
     options: [
       { type: STRING, name: "ambientacion", description: "Mundo o premisa de la aventura", required: true },
       { type: STRING, name: "tono", description: "épico, oscuro, humor, terror…", required: false },
@@ -55,9 +59,10 @@ const commands = [
   { name: "estado", description: "Ver personajes, acciones pendientes y resumen de la campaña" },
 ];
 
-const { DISCORD_APP_ID, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID } = process.env;
+const { DISCORD_APP_ID, DISCORD_GUILD_ID } = process.env;
+const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN;
 if (!DISCORD_APP_ID || !DISCORD_BOT_TOKEN) {
-  console.error("Faltan DISCORD_APP_ID y/o DISCORD_BOT_TOKEN");
+  console.error("Faltan DISCORD_APP_ID y/o DISCORD_TOKEN en .env");
   process.exit(1);
 }
 

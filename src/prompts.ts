@@ -1,4 +1,4 @@
-import type { Campaign, Player } from "./db";
+import type { Campaign, Player } from "./vault";
 
 function playerList(players: Player[]): string {
   if (!players.length) return "(Todavía nadie se unió con /unirse o /importar.)";

@@ -1,22 +1,25 @@
 {
   "name": "dnd-dm-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "db:init": "wrangler d1 execute dnd-dm --remote --file=schema.sql",
-    "db:migrate": "wrangler d1 execute dnd-dm --remote --file=migrations/0002_fichas_nivel20.sql",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
     "register": "node scripts/register-commands.mjs",
     "typecheck": "tsc --noEmit"
   },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261006.1",
-    "typescript": "^5.6.0",
-    "wrangler": "^4.0.0"
-  },
   "dependencies": {
-    "unpdf": "^1.8.1"
+    "discord.js": "^14.0.0",
+    "tsx": "^4.0.0",
+    "unpdf": "^1.8.1",
+    "yaml": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
   }
 }

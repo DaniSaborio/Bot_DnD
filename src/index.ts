@@ -1,118 +1,97 @@
-import { verifyDiscordRequest, json, reply, postDeferred, InteractionType, ResponseType } from "./discord";
-import * as db from "./db";
+import { Client, Events, GatewayIntentBits, MessageFlags, type ChatInputCommandInteraction } from "discord.js";
+import { splitMessage } from "./discord";
+import * as db from "./vault";
 import { rollDice } from "./dice";
 import { checkUrl } from "./nivel20";
-import { checkAttachment, type DiscordAttachment } from "./pdf";
+import { checkAttachment } from "./pdf";
 import { runTurn, askOoc, maybeCompact, importSheet, type GameEnv, type SheetSource } from "./game";
 
-export interface Env extends GameEnv {
-  DISCORD_PUBLIC_KEY: string;
-  DISCORD_APP_ID: string;
+try {
+  process.loadEnvFile();
+} catch {
+  // Sin .env: se usan las variables de entorno del sistema.
 }
 
-type Interaction = {
-  type: number;
-  token: string;
-  channel_id?: string;
-  channel?: { id: string };
-  member?: { user: { id: string } };
-  user?: { id: string };
-  data: {
-    name: string;
-    options?: { name: string; value: string }[];
-    resolved?: { attachments?: Record<string, DiscordAttachment> };
-  };
+const env: GameEnv = {
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  GEMINI_MODEL: process.env.GEMINI_MODEL,
+  GEMINI_THINKING: process.env.GEMINI_THINKING,
 };
 
-export default {
-  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (req.method !== "POST") return new Response("🎲 DM bot activo", { status: 200 });
+const NO_MENTIONS = { parse: [] };
 
-    const body = await req.text();
-    if (!(await verifyDiscordRequest(req, body, env.DISCORD_PUBLIC_KEY))) {
-      return new Response("Firma inválida", { status: 401 });
-    }
-
-    const interaction = JSON.parse(body) as Interaction;
-    if (interaction.type === InteractionType.PING) return json({ type: ResponseType.PONG });
-    if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-      try {
-        return await handleCommand(interaction, env, ctx);
-      } catch (e) {
-        console.error(e);
-        return reply(`⚠️ Error: ${(e as Error).message}`, true);
-      }
-    }
-    return json({ error: "Tipo de interacción no soportado" }, 400);
-  },
-} satisfies ExportedHandler<Env>;
+function reply(i: ChatInputCommandInteraction, content: string, ephemeral = false) {
+  return i.reply({ content: content.slice(0, 2000), flags: ephemeral ? MessageFlags.Ephemeral : undefined, allowedMentions: NO_MENTIONS });
+}
 
 /** Responde "pensando..." de inmediato (Discord exige respuesta en 3 s) y publica el resultado cuando esté listo. */
-function deferAndRun(ctx: ExecutionContext, env: Env, i: Interaction, work: () => Promise<string>, after?: () => Promise<void>): Response {
-  ctx.waitUntil(
-    (async () => {
-      let text: string;
-      try {
-        text = await work();
-      } catch (e) {
-        console.error(e);
-        text = `⚠️ El DM tuvo un problema: ${(e as Error).message}\nSus acciones siguen guardadas; prueben \`/narrar\`.`;
-      }
-      await postDeferred(env.DISCORD_APP_ID, i.token, text).catch((e) => console.error("No se pudo publicar en Discord", e));
-      if (after) await after().catch((e) => console.error("compactación", e));
-    })(),
-  );
-  return json({ type: ResponseType.DEFERRED_CHANNEL_MESSAGE });
+async function deferAndRun(i: ChatInputCommandInteraction, work: () => Promise<string>, after?: () => Promise<void>) {
+  await i.deferReply();
+  let text: string;
+  try {
+    text = await work();
+  } catch (e) {
+    console.error(e);
+    text = `⚠️ El DM tuvo un problema: ${(e as Error).message}\nSus acciones siguen guardadas; prueben \`/narrar\`.`;
+  }
+  const [first, ...rest] = splitMessage(text);
+  try {
+    await i.editReply({ content: first, allowedMentions: NO_MENTIONS });
+    for (const chunk of rest) await i.followUp({ content: chunk, allowedMentions: NO_MENTIONS });
+  } catch (e) {
+    console.error("No se pudo publicar en Discord", e);
+  }
+  if (after) await after().catch((e) => console.error("compactación", e));
 }
 
 /** Si todos los jugadores ya actuaron, dispara la narración; si no, avisa a quién se espera. */
-async function registerAndMaybeNarrate(i: Interaction, env: Env, ctx: ExecutionContext, ch: string, userId: string, line: string, header: string) {
-  await db.addPending(env.DB, ch, userId, line);
-  const [players, pending] = await Promise.all([db.getPlayers(env.DB, ch), db.getPending(env.DB, ch)]);
+async function registerAndMaybeNarrate(i: ChatInputCommandInteraction, ch: string, userId: string, line: string, header: string) {
+  await db.addPending(ch, userId, line);
+  const [players, pending] = await Promise.all([db.getPlayers(ch), db.getPending(ch)]);
   const acted = new Set(pending.map((p) => p.user_id));
   const waiting = players.filter((p) => !acted.has(p.user_id));
 
   if (waiting.length > 0) {
-    return reply(`${header}\n-# Esperando a: ${waiting.map((p) => p.character).join(", ")} · o usen /narrar`);
+    return reply(i, `${header}\n-# Esperando a: ${waiting.map((p) => p.character).join(", ")} · o usen /narrar`);
   }
   return deferAndRun(
-    ctx,
-    env,
     i,
     async () => `${header}\n\n${await runTurn(env, ch)}`,
     () => maybeCompact(env, ch),
   );
 }
 
-async function handleCommand(i: Interaction, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const ch = i.channel_id ?? i.channel?.id;
-  const userId = i.member?.user.id ?? i.user?.id;
-  if (!ch || !userId) return reply("No pude identificar el canal o el usuario.", true);
-  const opts = Object.fromEntries((i.data.options ?? []).map((o) => [o.name, String(o.value)]));
+async function handleCommand(i: ChatInputCommandInteraction) {
+  const ch = i.channelId;
+  const userId = i.user.id;
+  db.rememberChannel(ch, i.channel && "name" in i.channel ? (i.channel.name ?? undefined) : undefined);
+  const o = i.options;
 
-  switch (i.data.name) {
+  switch (i.commandName) {
     case "unirse": {
-      const character = opts.personaje.trim().slice(0, 60);
-      const description = (opts.descripcion ?? "").trim().slice(0, 500);
-      await db.upsertPlayer(env.DB, ch, userId, character, description);
-      return reply(`🛡️ <@${userId}> juega como **${character}**${description ? ` — ${description}` : ""}.`);
+      const character = o.getString("personaje", true).trim().slice(0, 60);
+      const description = (o.getString("descripcion") ?? "").trim().slice(0, 500);
+      await db.upsertPlayer(ch, userId, character, description);
+      return reply(i, `🛡️ <@${userId}> juega como **${character}**${description ? ` — ${description}` : ""}.`);
     }
 
     case "importar": {
       let source: SheetSource;
+      const file = o.getAttachment("archivo");
+      const link = o.getString("enlace");
       try {
-        if (opts.archivo) {
-          source = { kind: "pdf", attachment: checkAttachment(i.data.resolved?.attachments?.[opts.archivo]) };
-        } else if (opts.enlace) {
-          checkUrl(opts.enlace);
-          source = { kind: "link", link: opts.enlace };
+        if (file) {
+          source = { kind: "pdf", attachment: checkAttachment({ url: file.url, filename: file.name, size: file.size, content_type: file.contentType ?? undefined }) };
+        } else if (link) {
+          checkUrl(link);
+          source = { kind: "link", link };
         } else {
-          return reply("📥 Adjuntá el **PDF** de tu ficha en `archivo` (o pegá un enlace de Nivel20 en `enlace`).", true);
+          return reply(i, "📥 Adjuntá el **PDF** de tu ficha en `archivo` (o pegá un enlace de Nivel20 en `enlace`).", true);
         }
       } catch (e) {
-        return reply(`📥 ${(e as Error).message}`, true);
+        return reply(i, `📥 ${(e as Error).message}`, true);
       }
-      return deferAndRun(ctx, env, i, async () => {
+      return deferAndRun(i, async () => {
         try {
           const r = await importSheet(env, ch, userId, source);
           const from = source.kind === "pdf" ? "un PDF" : "Nivel20";
@@ -124,30 +103,28 @@ async function handleCommand(i: Interaction, env: Env, ctx: ExecutionContext): P
     }
 
     case "ficha": {
-      const targetId = opts.jugador ?? userId;
-      const player = await db.getPlayer(env.DB, ch, targetId);
-      if (!player) return reply(targetId === userId ? "No tenés personaje en este canal. Usá `/importar` o `/unirse`." : "Ese jugador no tiene personaje en este canal.", true);
+      const targetId = o.getUser("jugador")?.id ?? userId;
+      const player = await db.getPlayer(ch, targetId);
+      if (!player) return reply(i, targetId === userId ? "No tenés personaje en este canal. Usá `/importar` o `/unirse`." : "Ese jugador no tiene personaje en este canal.", true);
       if (!player.sheet) {
-        return reply(`**${player.character}**${player.description ? ` — ${player.description}` : ""}\n-# Sin ficha importada. Usá \`/importar\` y adjuntá el PDF de tu ficha.`, true);
+        return reply(i, `**${player.character}**${player.description ? ` — ${player.description}` : ""}\n-# Sin ficha importada. Usá \`/importar\` y adjuntá el PDF de tu ficha.`, true);
       }
-      const source = player.sheet_url
-        ? `\n-# Fuente: ${player.sheet_url.startsWith("http") ? `<${player.sheet_url}>` : player.sheet_url}`
-        : "";
-      return reply(`📜 **${player.character}**${player.description ? ` — ${player.description}` : ""}\n\`\`\`\n${player.sheet.slice(0, 1700)}\n\`\`\`${source}`, true);
+      const source = player.sheet_url ? `\n-# Fuente: ${player.sheet_url.startsWith("http") ? `<${player.sheet_url}>` : player.sheet_url}` : "";
+      return reply(i, `📜 **${player.character}**${player.description ? ` — ${player.description}` : ""}\n\`\`\`\n${player.sheet.slice(0, 1700)}\n\`\`\`${source}`, true);
     }
 
     case "salir": {
-      const player = await db.getPlayer(env.DB, ch, userId);
-      if (!player) return reply("No estás en la campaña de este canal.", true);
-      await db.removePlayer(env.DB, ch, userId);
-      return reply(`👋 **${player.character}** deja la mesa.`);
+      const player = await db.getPlayer(ch, userId);
+      if (!player) return reply(i, "No estás en la campaña de este canal.", true);
+      await db.removePlayer(ch, userId);
+      return reply(i, `👋 **${player.character}** deja la mesa.`);
     }
 
     case "campaña": {
-      const setting = opts.ambientacion.trim().slice(0, 500);
-      const tone = (opts.tono ?? "aventura de fantasía clásica").trim().slice(0, 200);
-      await db.resetCampaign(env.DB, ch, setting, tone);
-      return deferAndRun(ctx, env, i, async () => {
+      const setting = o.getString("ambientacion", true).trim().slice(0, 500);
+      const tone = (o.getString("tono") ?? "aventura de fantasía clásica").trim().slice(0, 200);
+      await db.resetCampaign(ch, setting, tone);
+      return deferAndRun(i, async () => {
         const narration = await runTurn(
           env,
           ch,
@@ -158,60 +135,89 @@ async function handleCommand(i: Interaction, env: Env, ctx: ExecutionContext): P
     }
 
     case "accion": {
-      if (!(await db.getCampaign(env.DB, ch))) return reply("No hay campaña en este canal. Empiecen con `/campaña`.", true);
-      const player = await db.getPlayer(env.DB, ch, userId);
-      if (!player) return reply("Primero traé tu personaje con `/importar` (PDF de tu ficha) o `/unirse`.", true);
-      const text = opts.texto.trim().slice(0, 1000);
-      return registerAndMaybeNarrate(i, env, ctx, ch, userId, `${player.character}: ${text}`, `📝 **${player.character}**: ${text}`);
+      if (!(await db.getCampaign(ch))) return reply(i, "No hay campaña en este canal. Empiecen con `/campaña`.", true);
+      const player = await db.getPlayer(ch, userId);
+      if (!player) return reply(i, "Primero traé tu personaje con `/importar` (PDF de tu ficha) o `/unirse`.", true);
+      const text = o.getString("texto", true).trim().slice(0, 1000);
+      return registerAndMaybeNarrate(i, ch, userId, `${player.character}: ${text}`, `📝 **${player.character}**: ${text}`);
     }
 
     case "tirar": {
+      const dice = o.getString("dados", true);
       let result;
       try {
-        result = rollDice(opts.dados);
+        result = rollDice(dice);
       } catch (e) {
-        return reply(`🎲 ${(e as Error).message}. Ejemplos: \`1d20+5\`, \`2d20kh1\` (ventaja), \`2d20kl1\` (desventaja), \`8d6\`.`, true);
+        return reply(i, `🎲 ${(e as Error).message}. Ejemplos: \`1d20+5\`, \`2d20kh1\` (ventaja), \`2d20kl1\` (desventaja), \`8d6\`.`, true);
       }
-      const player = await db.getPlayer(env.DB, ch, userId);
+      const player = await db.getPlayer(ch, userId);
       const who = player ? `**${player.character}**` : `<@${userId}>`;
-      const header = `🎲 ${who} tira \`${opts.dados}\`: ${result.detail} = **${result.total}**${result.note ? ` ${result.note}` : ""}`;
+      const header = `🎲 ${who} tira \`${dice}\`: ${result.detail} = **${result.total}**${result.note ? ` ${result.note}` : ""}`;
 
-      const camp = await db.getCampaign(env.DB, ch);
-      if (!camp || !player) return reply(header);
-      const line = `${player.character} tira ${opts.dados}: ${result.detail.replace(/~~/g, "")} = ${result.total}${result.note ? ` (${result.note})` : ""}`;
-      return registerAndMaybeNarrate(i, env, ctx, ch, userId, line, header);
+      const camp = await db.getCampaign(ch);
+      if (!camp || !player) return reply(i, header);
+      const line = `${player.character} tira ${dice}: ${result.detail.replace(/~~/g, "")} = ${result.total}${result.note ? ` (${result.note})` : ""}`;
+      return registerAndMaybeNarrate(i, ch, userId, line, header);
     }
 
     case "narrar":
       return deferAndRun(
-        ctx,
-        env,
         i,
         () => runTurn(env, ch),
         () => maybeCompact(env, ch),
       );
 
     case "ooc": {
-      const player = await db.getPlayer(env.DB, ch, userId);
-      const question = opts.pregunta.trim().slice(0, 1000);
+      const player = await db.getPlayer(ch, userId);
+      const question = o.getString("pregunta", true).trim().slice(0, 1000);
       const who = player?.character ?? "Un jugador";
-      return deferAndRun(ctx, env, i, async () => `💬 **${who}** (fuera de personaje): ${question}\n\n${await askOoc(env, ch, who, question)}`);
+      return deferAndRun(i, async () => `💬 **${who}** (fuera de personaje): ${question}\n\n${await askOoc(env, ch, who, question)}`);
     }
 
     case "estado": {
-      const camp = await db.getCampaign(env.DB, ch);
-      if (!camp) return reply("No hay campaña en este canal. Empiecen con `/campaña`.", true);
-      const [players, pending] = await Promise.all([db.getPlayers(env.DB, ch), db.getPending(env.DB, ch)]);
+      const camp = await db.getCampaign(ch);
+      if (!camp) return reply(i, "No hay campaña en este canal. Empiecen con `/campaña`.", true);
+      const [players, pending] = await Promise.all([db.getPlayers(ch), db.getPending(ch)]);
       const lines = [
         `📜 **${camp.setting}** · *${camp.tone}*`,
         `**Personajes:** ${players.length ? players.map((p) => p.character).join(", ") : "nadie todavía"}`,
         `**Acciones pendientes:** ${pending.length ? "\n" + pending.map((p) => `• ${p.content}`).join("\n") : "ninguna"}`,
       ];
       if (camp.summary) lines.push(`**Resumen:**\n${camp.summary}`);
-      return reply(lines.join("\n"), true);
+      return reply(i, lines.join("\n"), true);
     }
 
     default:
-      return reply("Comando desconocido.", true);
+      return reply(i, "Comando desconocido.", true);
   }
 }
+
+async function main() {
+  const { DISCORD_TOKEN, OBSIDIAN_VAULT, OBSIDIAN_FOLDER } = process.env;
+  if (!DISCORD_TOKEN) throw new Error("Falta DISCORD_TOKEN en .env");
+  if (!OBSIDIAN_VAULT) throw new Error("Falta OBSIDIAN_VAULT en .env (la carpeta de tu bóveda de Obsidian)");
+  if (!env.GEMINI_API_KEY) throw new Error("Falta GEMINI_API_KEY en .env");
+
+  const folder = await db.initVault(OBSIDIAN_VAULT, OBSIDIAN_FOLDER || "DnD");
+  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+  client.once(Events.ClientReady, (c) => console.log(`🎲 DM bot conectado como ${c.user.tag} · campañas en ${folder}`));
+  client.on(Events.InteractionCreate, async (i) => {
+    if (!i.isChatInputCommand()) return;
+    try {
+      await handleCommand(i);
+    } catch (e) {
+      console.error(e);
+      const content = `⚠️ Error: ${(e as Error).message}`.slice(0, 2000);
+      if (i.deferred || i.replied) await i.followUp({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
+      else await i.reply({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+  });
+
+  await client.login(DISCORD_TOKEN);
+}
+
+main().catch((e) => {
+  console.error(`❌ ${(e as Error).message}`);
+  process.exit(1);
+});
