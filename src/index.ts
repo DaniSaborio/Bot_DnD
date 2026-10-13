@@ -16,6 +16,7 @@ import { checkUrl } from "./nivel20";
 import { checkAttachment } from "./pdf";
 import { runTurn, advance, resolveRoll, askOoc, maybeCompact, importSheet, quotaReport, type GameEnv, type SheetSource } from "./game";
 import { initQuota } from "./quota";
+import { statsSummary } from "./stats";
 import { warmUp, ollamaModel } from "./ollama";
 
 try {
@@ -181,7 +182,14 @@ async function handleCommand(i: ChatInputCommandInteraction) {
         try {
           const r = await importSheet(env, ch, userId, source);
           const from = source.kind === "pdf" ? "un PDF" : "Nivel20";
-          return `📥 <@${userId}> importó a **${r.character}** desde ${from} — ${r.description}\n-# El DM ya usa su ficha. Si tu personaje cambia, volvé a usar /importar. Ver la ficha: /ficha`;
+          const lines: string[] = [];
+          if (r.verified) lines.push(`🔍 ${r.verified} números leídos directamente de la ficha, sin IA.`);
+          if (r.corrected.length) lines.push(`🔧 Corregí ${r.corrected.length} que la IA había leído mal:\n${r.corrected.map((c) => `• ${c}`).join("\n")}`);
+          if (!r.stats) lines.push("⚠️ No pude leer las estadísticas exactas: el bot no va a poder calcular tus bonificadores. Revisá la ficha con /ficha.");
+          else if (r.warnings.length) lines.push(`⚠️ **Revisá estos números** (si están mal, corregilos en la nota de tu personaje en Obsidian):\n${r.warnings.map((w) => `• ${w}`).join("\n")}`);
+          else lines.push("✅ Todos los bonificadores cuadran con tus características y tu competencia.");
+          const check = `\n${lines.join("\n")}`;
+          return `📥 <@${userId}> importó a **${r.character}** desde ${from} — ${r.description}${check}\n-# Mirá todos los números que va a usar el bot con /ficha. Si tu personaje cambia, volvé a usar /importar.`;
         } catch (e) {
           return `📥 No pude importar la ficha: ${(e as Error).message}`;
         }
@@ -196,7 +204,13 @@ async function handleCommand(i: ChatInputCommandInteraction) {
         return reply(i, `**${player.character}**${player.description ? ` — ${player.description}` : ""}\n-# Sin ficha importada. Usá \`/importar\` y adjuntá el PDF de tu ficha.`, true);
       }
       const source = player.sheet_url ? `\n-# Fuente: ${player.sheet_url.startsWith("http") ? `<${player.sheet_url}>` : player.sheet_url}` : "";
-      return reply(i, `📜 **${player.character}**${player.description ? ` — ${player.description}` : ""}\n\`\`\`\n${player.sheet.slice(0, 1700)}\n\`\`\`${source}`, true);
+      const numbers = player.stats
+        ? `\n**Números que usa el bot para tus tiradas:**\n\`\`\`\n${statsSummary(player.stats)}\n\`\`\``
+        : "\n⚠️ Sin estadísticas exactas: el bot busca los bonificadores en el texto de la ficha.";
+      const head = `📜 **${player.character}**${player.description ? ` — ${player.description}` : ""}${numbers}`;
+      const room = 2000 - head.length - source.length - 12;
+      const sheet = room > 100 ? `\n\`\`\`\n${player.sheet.length > room ? player.sheet.slice(0, room - 1) + "…" : player.sheet}\n\`\`\`` : "";
+      return reply(i, `${head}${sheet}${source}`, true);
     }
 
     case "salir": {

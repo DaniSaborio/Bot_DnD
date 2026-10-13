@@ -7,6 +7,8 @@ import { usage, nextReset, parseLimits } from "./quota";
 import { dmSystemPrompt, oocSystemPrompt, SUMMARY_SYSTEM, SHEET_SYSTEM } from "./prompts";
 import { fetchNivel20Sheet } from "./nivel20";
 import { fetchPdfText, type DiscordAttachment } from "./pdf";
+import { statsFromImport, type Stats } from "./stats";
+import { mergeStats } from "./sheetparse";
 
 export interface GameEnv extends AIEnv {
   /** Límites diarios de la cuenta, como se ven en AI Studio: "gemini-3.8-flash=250,gemini-3.5-flash-lite=1000". */
@@ -113,7 +115,8 @@ export async function resolveRoll(ch: string, userId: string, by: { rollId: numb
     `🎲 **${req.character}** tira ${req.tipo} \`${expr}\`: ${roll.detail} = **${roll.total}**${roll.note ? ` ${roll.note}` : ""} vs CD ${req.cd} → ` +
     (success ? "✅ éxito" : "❌ fallo") +
     (crit ? " **¡CRÍTICO!**" : "") +
-    (damage ? ` · 💥 daño **${damage.total}** (${damage.detail})` : "");
+    (damage ? ` · 💥 daño **${damage.total}** (${damage.detail})` : "") +
+    ("rollId" in by && req.fuente ? `\n-# ${req.fuente}` : "");
   return { display, remaining: picked.remaining };
 }
 
@@ -131,6 +134,13 @@ export interface ImportedSheet {
   description: string;
   sheet: string;
   url: string;
+  stats: Stats | null;
+  /** Números que no cuadran o faltan: el jugador debería revisarlos en Obsidian. */
+  warnings: string[];
+  /** Números que la IA leyó mal y el lector en código corrigió. */
+  corrected: string[];
+  /** Cuántos números se leyeron directamente del texto, sin IA. */
+  verified: number;
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {
@@ -170,8 +180,11 @@ export async function importSheet(env: GameEnv, ch: string, userId: string, sour
   const sheet = String(data.ficha ?? "").trim().slice(0, 2000);
   if (!character || !sheet) throw new Error("La ficha llegó incompleta; revisá que sea la ficha de tu personaje");
 
-  await db.savePlayerSheet(ch, userId, character, description, sheet, origin);
-  return { character, description, sheet, url: origin };
+  // Los números que el código puede leer directamente del texto mandan; la IA solo completa lo que falte.
+  const { merged, corrected, verified } = mergeStats(text, data.estadisticas);
+  const { stats, warnings } = statsFromImport(merged, Number(data.nivel) || undefined);
+  await db.savePlayerSheet(ch, userId, character, description, sheet, origin, stats);
+  return { character, description, sheet, url: origin, stats, warnings, corrected, verified };
 }
 
 /** Cuando la historia crece, resume los mensajes más viejos en el resumen de la campaña. */

@@ -11,6 +11,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { statsFromProps, statsToProps, type Stats } from "./stats";
 
 export interface Campaign {
   channel_id: string;
@@ -24,6 +25,8 @@ export interface Player {
   description: string;
   sheet: string;
   sheet_url: string;
+  /** Números exactos de la ficha (propiedades de la nota). null si no hay ficha importada o le faltan datos. */
+  stats: Stats | null;
 }
 export interface Message {
   id: number;
@@ -44,6 +47,8 @@ export interface RollRequest {
   cd: number;
   dano: string;
   motivo: string;
+  /** De dónde sale el bonificador, para mostrarlo en la tirada. */
+  fuente?: string;
 }
 
 const CAMPAIGN_FILE = "Campaña.md";
@@ -222,6 +227,7 @@ async function readPlayerFiles(ch: string): Promise<{ file: string; player: Play
         description: str(meta.descripcion),
         sheet: section(body, SHEET_HEADING),
         sheet_url: str(meta.fuente),
+        stats: statsFromProps(meta),
       },
     });
   }
@@ -236,7 +242,7 @@ function playerBody(p: Player): string {
 async function writePlayer(ch: string, p: Player, previousFile?: string) {
   const dir = await channelDir(ch);
   const file = path.join(dir, PLAYERS_DIR, `${safeName(p.character)}.md`);
-  const meta = { user_id: p.user_id, personaje: p.character, descripcion: p.description, fuente: p.sheet_url };
+  const meta = { user_id: p.user_id, personaje: p.character, descripcion: p.description, fuente: p.sheet_url, ...(p.stats ? statsToProps(p.stats) : {}) };
   await writeFile(file, renderNote(meta, playerBody(p)));
   if (previousFile && previousFile !== file) await fs.rm(previousFile, { force: true });
 }
@@ -254,17 +260,17 @@ export async function getPlayer(ch: string, userId: string): Promise<Player | nu
 export function upsertPlayer(ch: string, userId: string, character: string, description: string): Promise<void> {
   return serialize(ch, async () => {
     const existing = (await readPlayerFiles(ch)).find((f) => f.player.user_id === userId);
-    const base: Player = existing?.player ?? { user_id: userId, character, description: "", sheet: "", sheet_url: "" };
+    const base: Player = existing?.player ?? { user_id: userId, character, description: "", sheet: "", sheet_url: "", stats: null };
     if (base.sheet.startsWith("(Sin ficha importada")) base.sheet = "";
     await writePlayer(ch, { ...base, character, description: description || base.description }, existing?.file);
   });
 }
 
 /** /importar: crea o actualiza el personaje con la ficha leída. */
-export function savePlayerSheet(ch: string, userId: string, character: string, description: string, sheet: string, url: string): Promise<void> {
+export function savePlayerSheet(ch: string, userId: string, character: string, description: string, sheet: string, url: string, stats: Stats | null = null): Promise<void> {
   return serialize(ch, async () => {
     const existing = (await readPlayerFiles(ch)).find((f) => f.player.user_id === userId);
-    await writePlayer(ch, { user_id: userId, character, description, sheet, sheet_url: url }, existing?.file);
+    await writePlayer(ch, { user_id: userId, character, description, sheet, sheet_url: url, stats }, existing?.file);
   });
 }
 

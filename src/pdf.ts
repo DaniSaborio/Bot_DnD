@@ -50,7 +50,10 @@ export async function pdfToText(data: Uint8Array): Promise<string> {
     const annotations = (await page.getAnnotations()) as Array<Record<string, any>>;
     for (const a of annotations) {
       if (a.subtype !== "Widget") continue;
-      const name = String(a.alternativeText || a.fieldName || "").trim();
+      // El nombre técnico del campo primero (lo usa el lector en código); la descripción entre paréntesis ayuda a la IA.
+      const field = String(a.fieldName || "").trim();
+      const alt = String(a.alternativeText || "").trim();
+      const name = field && alt && alt !== field ? `${field} (${alt})` : field || alt;
       let value = a.fieldValue;
       if (Array.isArray(value)) value = value.join(", ");
       if (a.checkBox || a.radioButton) {
