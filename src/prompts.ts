@@ -109,7 +109,7 @@ Respondé ÚNICAMENTE con un objeto JSON, sin texto antes ni después:
 
 "estadisticas" son los NÚMEROS EXACTOS de la ficha; el bot los usa para calcular cada tirada, así que un error ahí es una tirada mal hecha:
 {"caracteristicas": {"fue": 16, "des": 12, "con": 14, "int": 10, "sab": 12, "car": 8},
- "competencia": 2, "ca": 18, "hp_max": 28, "iniciativa": 1,
+ "competencia": 2, "ca": 18, "hp_max": 28, "iniciativa": 1, "cd_conjuros": 13, "ataque_conjuros": 5,
  "salvaciones": {"fue": 5, "con": 4},
  "habilidades": {"Atletismo": 5, "Percepción": 3},
  "ataques": [{"nombre": "Espada larga", "bono": 5, "dano": "1d8+3"}]}
@@ -117,6 +117,7 @@ Respondé ÚNICAMENTE con un objeto JSON, sin texto antes ni después:
 - "salvaciones" y "habilidades": el bonificador TOTAL tal como está escrito en la ficha. Incluí todas las que tengan un número escrito; si la ficha no tiene número para una, no la pongas.
 - Nombres de habilidades en español: Acrobacias, Arcanos, Atletismo, Engaño, Historia, Interpretación, Intimidación, Investigación, Juego de manos, Medicina, Naturaleza, Percepción, Perspicacia, Persuasión, Religión, Sigilo, Supervivencia, Trato con animales.
 - "ataques": cada arma o ataque con su bonificador para impactar y su daño, tal como en la ficha.
+- "cd_conjuros" y "ataque_conjuros": solo si el personaje lanza conjuros y la ficha los tiene escritos.
 - Copiá los números tal cual. No calcules, no redondees, no completes lo que falta: si un dato no está, omitilo.
 
 La "ficha" es texto plano en español, máximo ~1300 caracteres, con líneas cortas, e incluye solo lo que aparezca en la ficha:
@@ -147,7 +148,7 @@ Pedí una tirada solo si el resultado es incierto Y fallar tiene consecuencias. 
 
 Por cada personaje que necesite tirar (máximo una tirada por personaje), indicá:
 - personaje: el nombre del personaje.
-- categoria: "habilidad", "salvacion", "caracteristica", "ataque" o "iniciativa".
+- categoria: "habilidad", "salvacion", "caracteristica", "ataque", "iniciativa" o "conjuro".
   · Si algo le PASA al personaje y trata de evitarlo o resistirlo (trampa, explosión, caída, veneno, hechizo, aliento de dragón) → "salvacion", aunque describa cómo lo esquiva.
   · Si el personaje INTENTA hacer algo → "habilidad" de la guía (forzar una puerta es Atletismo, no una prueba de FUE).
   · "caracteristica" solo para lo que ninguna habilidad cubre (ej. aguantar la respiración: CON).
@@ -158,7 +159,16 @@ Por cada personaje que necesite tirar (máximo una tirada por personaje), indic�
 - ventaja: "normal", "ventaja" o "desventaja" según la situación (por ejemplo, atacar a alguien que no te ve da ventaja).
 - motivo: qué intenta lograr, en pocas palabras.
 
-NO escribas bonificadores ni dados: el bot los calcula con los números exactos de la ficha.
+- Si la categoría es "conjuro" (el personaje LANZA un conjuro):
+  · conjuro: el nombre del conjuro tal como figura en la ficha. nivel_espacio: el nivel del espacio que usa (0 para trucos; si no lo dice, el nivel del conjuro).
+  · cd: para conjuros de ataque, la CA estimada del objetivo; para los demás, 0.
+  · bono_salvacion_objetivo: para conjuros donde el OBJETIVO tira salvación, su bonificador estimado (criatura débil 0, común 1-2, fuerte 3-5); si no, 0.
+  · tipo_conjuro, salvacion_conjuro y dados_conjuro: solo si es un conjuro poco común; el bot ya conoce los habituales (Dormir, Proyectil mágico, Retener persona, Bola de fuego…). Si no, "" .
+  · Los conjuros sin tirada (Luz, Mano de mago, Mensaje, Ilusión menor, Escudo, Bendición, Armadura de mago…) NO llevan tirada.
+  · Para los demás campos de un conjuro: habilidad "", caracteristica "", arma "".
+- Para lo que no es conjuro: conjuro "", nivel_espacio 0, tipo_conjuro "", salvacion_conjuro "", dados_conjuro "", bono_salvacion_objetivo 0.
+
+NO escribas bonificadores del personaje ni sus dados: el bot los calcula con los números exactos de la ficha.
 
 Guía de habilidades: forzar, empujar, trepar, nadar → Atletismo · esconderse, moverse sin ruido → Sigilo · robar, quitar algo sin que se note, abrir cerraduras → Juego de manos · notar algo, vigilar → Percepción · buscar pistas, investigar → Investigación · darse cuenta si alguien miente → Perspicacia · mentir, distraer con engaños → Engaño · convencer → Persuasión · amenazar → Intimidación · esquivar una trampa o explosión → salvación de DES · resistir veneno → salvación de CON · resistir un hechizo mental → salvación de SAB · atacar → "ataque".
 Mirar alrededor o vigilar sin un peligro concreto no requiere tirada. Ayudar a otro personaje (distraer, sostener algo) no requiere tirada propia.

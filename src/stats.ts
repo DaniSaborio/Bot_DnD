@@ -43,6 +43,8 @@ export interface Stats {
   iniciativa?: number;
   ca?: number;
   hp_max?: number;
+  /** CD de salvación y bonificador de ataque de conjuros, tal como están en la ficha. */
+  conjuros?: { cd?: number; ataque?: number };
 }
 
 export const mod = (score: number) => Math.floor((score - 10) / 2);
@@ -67,9 +69,43 @@ function abilityKey(raw: string): Ability | undefined {
   return alias[k];
 }
 
-function skillKey(raw: string): string | undefined {
+// Otras formas en que las fichas nombran las habilidades (verbos, traducciones viejas, inglés).
+const SKILL_ALIASES: Record<string, string> = {
+  enganar: "Engaño",
+  engano: "Engaño",
+  deception: "Engaño",
+  interpretar: "Interpretación",
+  actuacion: "Interpretación",
+  performance: "Interpretación",
+  intimidar: "Intimidación",
+  intimidation: "Intimidación",
+  investigar: "Investigación",
+  investigation: "Investigación",
+  percibir: "Percepción",
+  perception: "Percepción",
+  persuadir: "Persuasión",
+  persuasion: "Persuasión",
+  "conocimiento arcano": "Arcanos",
+  arcana: "Arcanos",
+  "manejo de animales": "Trato con animales",
+  "trato animal": "Trato con animales",
+  "animal handling": "Trato con animales",
+  "juegos de manos": "Juego de manos",
+  "sleight of hand": "Juego de manos",
+  athletics: "Atletismo",
+  acrobatics: "Acrobacias",
+  stealth: "Sigilo",
+  insight: "Perspicacia",
+  medicine: "Medicina",
+  nature: "Naturaleza",
+  religion: "Religión",
+  history: "Historia",
+  survival: "Supervivencia",
+};
+
+export function skillKey(raw: string): string | undefined {
   const n = norm(raw);
-  return SKILL_NAMES.find((s) => norm(s) === n) ?? SKILL_NAMES.find((s) => n.startsWith(norm(s)));
+  return SKILL_NAMES.find((s) => norm(s) === n) ?? SKILL_ALIASES[n] ?? SKILL_NAMES.find((s) => n.startsWith(norm(s))) ?? Object.entries(SKILL_ALIASES).find(([a]) => n.startsWith(a))?.[1];
 }
 
 /** "Atletismo +5" / "Espada larga +5 · 1d8+3" → nombre, número y resto. */
@@ -93,10 +129,12 @@ export function statsToProps(s: Stats): Record<string, unknown> {
   props.salvaciones = ABILITIES.filter((a) => s.salvaciones[a] != null).map((a) => `${ABILITY_LABEL[a]} ${signed(s.salvaciones[a]!)}`);
   props.habilidades = Object.entries(s.habilidades).map(([k, v]) => `${k} ${signed(v)}`);
   props.ataques = s.ataques.map((a) => `${a.nombre} ${signed(a.bono)}${a.dano ? ` · ${a.dano}` : ""}`);
+  if (s.conjuros?.cd != null) props.cd_conjuros = s.conjuros.cd;
+  if (s.conjuros?.ataque != null) props.ataque_conjuros = s.conjuros.ataque;
   return props;
 }
 
-export const STAT_PROPS = ["competencia", ...ABILITIES, "ca", "hp_max", "iniciativa", "salvaciones", "habilidades", "ataques"];
+export const STAT_PROPS = ["competencia", ...ABILITIES, "ca", "hp_max", "iniciativa", "salvaciones", "habilidades", "ataques", "cd_conjuros", "ataque_conjuros"];
 
 /** Propiedades de la nota → estadísticas. Devuelve null si faltan las características (no hay con qué calcular). */
 export function statsFromProps(meta: Record<string, unknown>): Stats | null {
@@ -130,6 +168,7 @@ export function statsFromProps(meta: Record<string, unknown>): Stats | null {
     iniciativa: int(meta.iniciativa),
     ca: int(meta.ca),
     hp_max: int(meta.hp_max),
+    ...(int(meta.cd_conjuros) != null || int(meta.ataque_conjuros) != null ? { conjuros: { cd: int(meta.cd_conjuros), ataque: int(meta.ataque_conjuros) } } : {}),
   };
 }
 
@@ -192,7 +231,17 @@ export function statsFromImport(raw: unknown, nivel?: number): { stats: Stats | 
   }
 
   return {
-    stats: { competencia, scores, salvaciones, habilidades, ataques, iniciativa: int(r.iniciativa), ca: int(r.ca), hp_max: int(r.hp_max) },
+    stats: {
+      competencia,
+      scores,
+      salvaciones,
+      habilidades,
+      ataques,
+      iniciativa: int(r.iniciativa),
+      ca: int(r.ca),
+      hp_max: int(r.hp_max),
+      ...(int(r.cd_conjuros) != null || int(r.ataque_conjuros) != null ? { conjuros: { cd: int(r.cd_conjuros), ataque: int(r.ataque_conjuros) } } : {}),
+    },
     warnings,
   };
 }

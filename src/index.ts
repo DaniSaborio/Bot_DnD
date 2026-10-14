@@ -50,6 +50,14 @@ interface Out {
   rolls?: db.RollRequest[];
 }
 
+/** Lo que dice el botón: en un conjuro de salvación tira el objetivo, así que se muestra la CD del lanzador. */
+function buttonLabel(r: db.RollRequest): string {
+  const name = r.tipo.replace(/^Conjuro: /, "");
+  if (r.conjuro?.tipo === "salvacion") return `✨ ${r.character}: ${name} (CD ${r.cd} ${(r.conjuro.salvacion ?? "").toUpperCase()})`;
+  if (r.conjuro) return `✨ ${r.character}: ${name} (${r.dados})`;
+  return `🎲 ${r.character}: ${r.tipo} (${r.dados})`;
+}
+
 /** Botones para las tiradas que pidió el árbitro (Discord permite hasta 5 por fila). */
 function rollButtons(rolls: db.RollRequest[]) {
   const rows: ActionRowBuilder<ButtonBuilder>[] = [];
@@ -60,7 +68,7 @@ function rollButtons(rolls: db.RollRequest[]) {
           new ButtonBuilder()
             .setCustomId(`tirar:${r.id}`)
             .setStyle(ButtonStyle.Primary)
-            .setLabel(`🎲 ${r.character}: ${r.tipo} (${r.dados})`.slice(0, 80)),
+            .setLabel(buttonLabel(r).slice(0, 80)),
         ),
       ),
     );

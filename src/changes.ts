@@ -79,13 +79,21 @@ export function applyOps(state: CampaignState, ops: Op[], hpMax?: number): Campa
   const s: CampaignState = { ...state, inventario: [...state.inventario], perdidos: [...state.perdidos], condiciones: [...state.condiciones], dinero: { ...state.dinero } };
   for (const op of ops) {
     if (op.kind === "item") {
-      const i = s.inventario.findIndex((x) => norm(x) === norm(op.name));
+      const want = withQty(op.name);
+      const i = s.inventario.findIndex((x) => norm(withQty(x).name) === norm(want.name));
       if (op.add) {
-        const j = s.perdidos.findIndex((x) => norm(x) === norm(op.name));
+        const j = s.perdidos.findIndex((x) => norm(x) === norm(want.name));
         if (j >= 0) s.perdidos.splice(j, 1); // recuperó algo que había perdido
-        else s.inventario.push(op.name);
-      } else if (i >= 0) s.inventario.splice(i, 1);
-      else if (!s.perdidos.some((x) => norm(x) === norm(op.name))) s.perdidos.push(op.name);
+        else if (i >= 0) {
+          // Ya lo tenía: se suma la cantidad en vez de repetirlo
+          const have = withQty(s.inventario[i]);
+          s.inventario[i] = qtyName(have.name, have.qty + want.qty);
+        } else s.inventario.push(qtyName(want.name, want.qty));
+      } else if (i >= 0) {
+        const have = withQty(s.inventario[i]);
+        if (have.qty > want.qty) s.inventario[i] = qtyName(have.name, have.qty - want.qty);
+        else s.inventario.splice(i, 1);
+      } else if (!s.perdidos.some((x) => norm(x) === norm(want.name))) s.perdidos.push(want.name);
     } else if (op.kind === "money") {
       s.dinero = op.amount >= 0 ? { ...s.dinero, [op.coin]: (s.dinero[op.coin] ?? 0) + op.amount } : pay(s.dinero, op.coin, -op.amount);
     } else if (op.kind === "hp") {
@@ -142,6 +150,17 @@ export function pay(purse: Partial<Record<Coin, number>>, coin: Coin, amount: nu
   if (need) p[coin] = (p[coin] ?? 0) - need;
   return p;
 }
+
+/** "Antorcha (2)" / "2 antorchas" → nombre y cantidad. */
+function withQty(raw: string): { name: string; qty: number } {
+  let m = /^(.*?)\s*\((?:x\s*)?(\d+)\)$/i.exec(raw.trim());
+  if (m) return { name: m[1].trim(), qty: Number(m[2]) };
+  m = /^(.*?)\s*x\s*(\d+)$/i.exec(raw.trim());
+  if (m) return { name: m[1].trim(), qty: Number(m[2]) };
+  return { name: raw.trim(), qty: 1 };
+}
+
+const qtyName = (name: string, qty: number) => (qty > 1 ? `${name} (${qty})` : name);
 
 const signedAmount = (n: number) => (n > 0 ? `+${n}` : `${n}`);
 

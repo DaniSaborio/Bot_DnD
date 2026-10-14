@@ -26,6 +26,14 @@ Bot de Discord que hace de Dungeon Master, **100% gratis**: **Google Gemini** na
 
 Si el árbitro no pide tiradas, el DM narra directamente. Si alguien no tiene nada que hacer, o no quieren esperar una tirada, usen `/narrar`.
 
+**Conjuros:** cada conjuro se resuelve como en el Manual del Jugador, no siempre con 1d20:
+- **De ataque** (*Rayo de fuego*, *Saeta guía*): 1d20 + tu ataque de conjuros contra la CA del objetivo, y el daño si pega.
+- **De salvación** (*Burla dañina*, *Risa horrible de Tasha*, *Bola de fuego*): el **objetivo** tira la salvación contra **tu CD de conjuros**; el bot la tira por el enemigo y aplica el daño completo, la mitad o nada.
+- **De efecto** (*Dormir*, *Proyectil mágico*, *Palabra de curación*): se tiran los dados del efecto (Dormir: 5d8 puntos de golpe de criaturas que se duermen), sin d20.
+- **Sin tirada** (*Luz*, *Mensaje*, *Escudo*): no aparece botón.
+
+Los dados suben con el nivel del espacio (Dormir con espacio de nivel 2: 7d8) y los trucos con tu nivel. La CD y el ataque de conjuros salen de tu ficha (o se calculan con la característica de tu clase), y el bot te avisa si lanzás algo que no figura en tu ficha. Conoce los conjuros más comunes de niveles 0 a 3 (`src/spells.ts`); para otros, el árbitro indica cómo se resuelven.
+
 **Dados:** las tiradas son reales y el DM respeta el resultado. La CD se decide *antes* de tirar, así que no se puede acomodar. Si preferís tirar a mano, `/tirar` también resuelve la tirada que te pidió el árbitro.
 
 **Memoria:** cuando la historia crece, el bot resume lo más viejo automáticamente (historia, estado de personajes, NPCs, misiones), así la campaña puede durar meses sin perder el hilo.

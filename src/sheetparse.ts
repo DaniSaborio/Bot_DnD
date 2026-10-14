@@ -9,6 +9,8 @@ export interface RawStats {
   ca?: number;
   hp_max?: number;
   iniciativa?: number;
+  cd_conjuros?: number;
+  ataque_conjuros?: number;
   salvaciones: Partial<Record<Ability, number>>;
   habilidades: Record<string, number>;
   ataques: { nombre: string; bono: number; dano: string }[];
@@ -27,10 +29,10 @@ const SKILL_WORDS: Record<string, string[]> = {
   Acrobacias: ["acrobacias", "acrobatics"],
   Arcanos: ["arcanos", "arcana", "conocimiento arcano"],
   Atletismo: ["atletismo", "athletics"],
-  Engaño: ["engano", "deception"],
+  Engaño: ["engano", "enganar", "deception"],
   Historia: ["historia", "history"],
-  Interpretación: ["interpretacion", "performance"],
-  Intimidación: ["intimidacion", "intimidation"],
+  Interpretación: ["interpretacion", "interpretar", "performance"],
+  Intimidación: ["intimidacion", "intimidar", "intimidation"],
   Investigación: ["investigacion", "investigation"],
   "Juego de manos": ["juego de manos", "sleight of hand"],
   Medicina: ["medicina", "medicine"],
@@ -97,6 +99,8 @@ function fromFormFields(text: string): RawStats {
     else if (key === "ac" && num != null) out.ca = num;
     else if (key === "hpmax" && num != null) out.hp_max = num;
     else if (key === "initiative" && num != null) out.iniciativa = num;
+    else if (key === "spellsavedc" && num != null) out.cd_conjuros = num;
+    else if (key === "spellatkbonus" && num != null) out.ataque_conjuros = num;
     else {
       // Wpn Name / Wpn1 AtkBonus / Wpn1 Damage, Wpn Name 2 / Wpn2 AtkBonus ...
       const w = /^wpn(?:name)?(\d?)(atkbonus|damage|name)?(\d?)$/.exec(key);
@@ -197,6 +201,8 @@ function fromText(text: string): RawStats {
   out.ca = num(/(?:clase de armadura|armor class|\bca\b)[^\d\n]{0,6}(\d{1,2})\b/);
   out.hp_max = num(/(?:puntos de golpe maximos|hit point maximum|hp max(?:imo)?|pg max(?:imos)?)[^\d\n]{0,8}(\d{1,3})\b/);
   out.iniciativa = num(/(?:iniciativa|initiative)[^\d+\-\n]{0,6}([+-]\s?\d{1,2})\b/);
+  out.cd_conjuros = num(/(?:cd de (?:salvacion de )?(?:los )?conjuros|cd de conjuros|spell save dc|conjuros?\s*\(?\s*cd)[^\d\n]{0,6}(\d{1,2})\b/);
+  out.ataque_conjuros = num(/(?:(?:bonificador de )?ataque de (?:los )?conjuros|spell attack(?: bonus)?|conjuros?\s*\(?[^)\n]{0,12}?(?:atq|ataque))[^\d+\-\n]{0,6}([+-]\s?\d{1,2})\b/);
 
   const scores = out.caracteristicas;
   const prof = out.competencia;
@@ -224,6 +230,8 @@ export function parseSheet(text: string): RawStats {
     ca: form.ca ?? loose.ca,
     hp_max: form.hp_max ?? loose.hp_max,
     iniciativa: form.iniciativa ?? loose.iniciativa,
+    cd_conjuros: form.cd_conjuros ?? loose.cd_conjuros,
+    ataque_conjuros: form.ataque_conjuros ?? loose.ataque_conjuros,
     salvaciones: { ...loose.salvaciones, ...form.salvaciones },
     habilidades: { ...loose.habilidades, ...form.habilidades },
     ataques: form.ataques,
@@ -286,6 +294,8 @@ export function mergeStats(text: string, ai: unknown): { merged: RawStats; corre
   merged.ca = pick("CA", code.ca, a.ca);
   merged.hp_max = pick("HP máximos", code.hp_max, a.hp_max);
   merged.iniciativa = pick("Iniciativa", code.iniciativa, a.iniciativa);
+  merged.cd_conjuros = pick("CD de conjuros", code.cd_conjuros, a.cd_conjuros);
+  merged.ataque_conjuros = pick("Ataque de conjuros", code.ataque_conjuros, a.ataque_conjuros);
 
   const aiAttacks = (Array.isArray(a.ataques) ? a.ataques : []) as RawStats["ataques"];
   const attacks = code.ataques.length ? code.ataques : verifyAttacks(text, aiAttacks);

@@ -30,7 +30,7 @@ export function turnLength(lines: string[], instruction?: string): keyof typeof 
   const text = lines.join("\n");
   if (/¡crítico!|20 natural|1 natural/.test(text)) return "larga";
   const rolls = lines.filter((l) => / vs CD \d+ → /.test(l));
-  if (rolls.some((l) => / tira Ataque /.test(l))) return "media"; // combate
+  if (rolls.some((l) => / tira (Ataque|Conjuro)/.test(l)) || lines.some((l) => / lanza .+(\(nivel|\(truco)/.test(l))) return "media"; // combate o conjuros
   if (rolls.some((l) => /→ éxito/.test(l))) return "media";
   return "breve"; // sin tiradas (acciones triviales) o solo fallos comunes
 }
@@ -125,10 +125,15 @@ export async function resolveRoll(ch: string, userId: string, by: { rollId: numb
   const picked = await db.takeRollRequest(ch, (r) => r.user_id === userId && ("rollId" in by ? r.id === by.rollId : true));
   if (!picked) return null;
   const req = picked.taken;
+  if (req.conjuro && req.conjuro.tipo !== "ataque") {
+    const out = await resolveSpell(ch, userId, req, "rollId" in by ? null : by.manual);
+    return { display: out, remaining: picked.remaining };
+  }
   const expr = "rollId" in by ? req.dados : by.expr;
   const roll = "rollId" in by ? rollDice(req.dados) : by.manual;
 
-  const isAttack = /^ataque/i.test(req.tipo);
+  // Los ataques de conjuro funcionan como un ataque: 20 natural siempre pega (crítico) y 1 natural siempre falla.
+  const isAttack = /^ataque/i.test(req.tipo) || req.conjuro?.tipo === "ataque";
   const nat20 = roll.note?.startsWith("¡20");
   const nat1 = roll.note?.startsWith("1 natural");
   const success = isAttack && nat20 ? true : isAttack && nat1 ? false : roll.total >= req.cd;
@@ -152,6 +157,50 @@ export async function resolveRoll(ch: string, userId: string, by: { rollId: numb
     (damage ? ` · 💥 daño **${damage.total}** (${damage.detail})` : "") +
     ("rollId" in by && req.fuente ? `\n-# ${req.fuente}` : "");
   return { display, remaining: picked.remaining };
+}
+
+/**
+ * Conjuros que no son de ataque. En los de salvación tira el OBJETIVO (el bot, con el bonificador que estimó el
+ * árbitro) contra la CD del lanzador; en los de efecto se tiran solo los dados del efecto.
+ */
+async function resolveSpell(ch: string, userId: string, req: db.RollRequest, manual: RollResult | null): Promise<string> {
+  const spell = req.conjuro!;
+  const name = req.tipo.replace(/^Conjuro: /, "");
+  const level = spell.nivel ? ` (nivel ${spell.nivel})` : " (truco)";
+  const source = req.fuente ? `\n-# ${req.fuente}` : "";
+
+  if (spell.tipo === "efecto") {
+    // Con /tirar el jugador puede tirar él mismo los dados del efecto.
+    const roll = manual ?? rollDice(req.dados);
+    const what = spell.curacion ? "HP curados" : (spell.efecto ?? "");
+    await db.addPending(ch, userId, `${req.character} lanza ${name}${level}: ${req.dados} = ${roll.total}${what ? ` ${what}` : ""}${req.motivo ? ` [${req.motivo}]` : ""}`);
+    return `✨ **${req.character}** lanza **${name}**${level}: \`${req.dados}\` ${roll.detail} = **${roll.total}**${what ? ` ${what}` : ""}${source}`;
+  }
+
+  // Salvación: tira el objetivo.
+  const save = rollDice(req.dados);
+  const resisted = save.total >= req.cd;
+  const ab = (spell.salvacion ?? "sab").toUpperCase();
+  let damage: RollResult | null = null;
+  let damageText = "";
+  if (req.dano) {
+    damage = rollDice(req.dano);
+    if (!resisted) damageText = `${damage.total} de daño`;
+    else if (spell.mitad) damageText = `${Math.floor(damage.total / 2)} de daño (la mitad)`;
+  }
+  const outcome = resisted ? (damageText ? "resiste en parte" : "resiste: el conjuro no le hace efecto") : `falla: ${damageText || spell.efecto || "el conjuro le hace efecto"}`;
+  await db.addPending(
+    ch,
+    userId,
+    `${req.character} lanza ${name}${level}: el objetivo tira salvación de ${ab} ${req.dados}: ${save.detail.replace(/~~/g, "")} = ${save.total} vs CD ${req.cd} → ${resisted ? "éxito del objetivo" : "fallo del objetivo"}` +
+      `${damageText ? `, ${damageText}` : ""}${!resisted && spell.efecto ? ` (${spell.efecto})` : ""}${req.motivo ? ` [${req.motivo}]` : ""}`,
+  );
+  return (
+    `✨ **${req.character}** lanza **${name}**${level}: el objetivo tira salvación de ${ab} \`${req.dados}\` ${save.detail} = **${save.total}** vs tu CD ${req.cd} → ` +
+    (resisted ? `🛡️ ${outcome}` : `✅ ${outcome}`) +
+    (damage ? ` · 💥 ${damage.detail} = ${damage.total}` : "") +
+    source
+  );
 }
 
 /** Pregunta fuera de personaje: usa el contexto pero no se guarda en la historia. */

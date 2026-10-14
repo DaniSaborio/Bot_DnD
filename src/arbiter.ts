@@ -6,10 +6,11 @@ import { callAI, type AIEnv } from "./ai";
 import { callOllama, ollamaModel } from "./ollama";
 import { recordRequest } from "./quota";
 import { ARBITER_SYSTEM } from "./prompts";
+import { casterNumbers, findSpell, spellDice, type SpellInfo, type SpellKind } from "./spells";
 import { ABILITIES, SKILLS, SKILL_NAMES, bonusFor, checkLabel, d20, mod, norm, signed, type Ability, type Bonus, type Check } from "./stats";
 import type { Player, RollRequest } from "./vault";
 
-const CATEGORIES = ["habilidad", "salvacion", "caracteristica", "ataque", "iniciativa"] as const;
+const CATEGORIES = ["habilidad", "salvacion", "caracteristica", "ataque", "iniciativa", "conjuro"] as const;
 const ABILITY_ENUM = ["", "FUE", "DES", "CON", "INT", "SAB", "CAR"];
 
 /** El formato de respuesta es cerrado: el modelo solo puede elegir de estas listas, nunca escribir números de dados. */
@@ -30,8 +31,14 @@ function schemaFor(players: Player[]) {
             cd: { type: "integer" },
             ventaja: { type: "string", enum: ["normal", "ventaja", "desventaja"] },
             motivo: { type: "string" },
+            conjuro: { type: "string" },
+            nivel_espacio: { type: "integer" },
+            tipo_conjuro: { type: "string", enum: ["", "ataque", "salvacion", "efecto"] },
+            salvacion_conjuro: { type: "string", enum: ABILITY_ENUM },
+            dados_conjuro: { type: "string" },
+            bono_salvacion_objetivo: { type: "integer" },
           },
-          required: ["personaje", "categoria", "habilidad", "caracteristica", "arma", "cd", "ventaja", "motivo"],
+          required: ["personaje", "categoria", "habilidad", "caracteristica", "arma", "cd", "ventaja", "motivo", "conjuro", "nivel_espacio", "tipo_conjuro", "salvacion_conjuro", "dados_conjuro", "bono_salvacion_objetivo"],
         },
       },
     },
@@ -107,6 +114,68 @@ function bonusForPlayer(player: Player, check: Check): Bonus {
   return { value: 0, source: player.sheet ? `⚠️ no encontré el bonificador de ${label} en tu ficha: tirá con /tirar y tu número` : "⚠️ sin ficha importada: tirá con /tirar y tu número" };
 }
 
+/**
+ * Un conjuro se resuelve según su tipo (ataque, salvación del objetivo o dados de efecto). Si está en la tabla del
+ * Manual del Jugador, los dados y la salvación salen de ahí; si no, de lo que indicó el árbitro. La CD y el ataque
+ * del lanzador siempre los calcula el código.
+ */
+function spellRequest(player: Player, t: Record<string, any>): Omit<RollRequest, "id"> | null {
+  const name = String(t.conjuro ?? "").trim().slice(0, 60);
+  if (!name) return null;
+  const known = findSpell(name);
+  const caster = casterNumbers(player.stats, player.sheet, player.description);
+  const tipo: SpellKind | undefined = known?.tipo ?? (["ataque", "salvacion", "efecto"].includes(t.tipo_conjuro) ? t.tipo_conjuro : undefined);
+  if (!tipo) return null;
+
+  const nivelBase = known?.nivel ?? Math.max(0, Math.min(9, Number(t.nivel_espacio) || 1));
+  const slot = nivelBase === 0 ? 0 : Math.max(nivelBase, Math.min(9, Number(t.nivel_espacio) || nivelBase));
+  const castMod = caster?.caracteristica && player.stats ? mod(player.stats.scores[caster.caracteristica]) : 0;
+  const info: SpellInfo = known ?? {
+    nombre: name,
+    nivel: nivelBase,
+    tipo,
+    salvacion: norm(String(t.salvacion_conjuro ?? "")).slice(0, 3) as Ability,
+    dados: /^\d*d\d+([+-]\d+)?$/i.test(String(t.dados_conjuro ?? "").replace(/\s+/g, "")) ? String(t.dados_conjuro).replace(/\s+/g, "") : "",
+    mitad: false,
+    alias: [],
+  };
+  const dice = spellDice(info, slot, caster?.nivel ?? 1, castMod);
+  const ventaja = t.ventaja === "ventaja" || t.ventaja === "desventaja" ? t.ventaja : "normal";
+
+  // ¿Lo tiene en su ficha? Si la ficha lista conjuros y este no está, se avisa (no se bloquea: puede ser un pergamino).
+  const sheetSpells = norm(player.sheet.split("\n").filter((l) => /conjuro|truco|hechizo/i.test(l)).join(" "));
+  const listed = !sheetSpells || [info.nombre, ...info.alias].some((a) => sheetSpells.includes(norm(a)));
+  const notes = [
+    !caster ? "⚠️ no encontré tu CD ni tu ataque de conjuros en la ficha" : `CD ${caster.cd} · ataque ${signed(caster.ataque)} (${caster.source})`,
+    known ? "" : "⚠️ conjuro fuera de la tabla del bot: tipo y dados según el árbitro",
+    listed ? "" : `⚠️ ${info.nombre} no figura en tu ficha`,
+    slot > nivelBase ? `lanzado con espacio de nivel ${slot}` : "",
+  ].filter(Boolean);
+
+  const base = {
+    user_id: player.user_id,
+    character: player.character,
+    tipo: `Conjuro: ${info.nombre}`,
+    motivo: String(t.motivo ?? "").trim().slice(0, 120),
+    fuente: notes.join(" · "),
+  };
+  if (tipo === "ataque") {
+    return { ...base, dados: d20(caster?.ataque ?? 0, ventaja), cd: Math.min(30, Math.max(5, Math.round(Number(t.cd) || 12))), dano: dice, conjuro: { tipo, nivel: slot } };
+  }
+  if (tipo === "salvacion") {
+    const ab = info.salvacion && ABILITIES.includes(info.salvacion) ? info.salvacion : "sab";
+    const targetBonus = Math.max(-5, Math.min(15, Math.round(Number(t.bono_salvacion_objetivo) || 0)));
+    return {
+      ...base,
+      dados: d20(targetBonus, "normal"),
+      cd: caster?.cd ?? 10,
+      dano: dice,
+      conjuro: { tipo, nivel: slot, salvacion: ab, mitad: !!info.mitad, efecto: info.efecto },
+    };
+  }
+  return { ...base, dados: dice || "0", cd: 0, dano: "", conjuro: { tipo, nivel: slot, curacion: !!info.curacion, efecto: info.efecto } };
+}
+
 function validate(raw: string, players: Player[]): Omit<RollRequest, "id">[] {
   let data: { tiradas?: unknown };
   try {
@@ -121,6 +190,11 @@ function validate(raw: string, players: Player[]): Omit<RollRequest, "id">[] {
     const name = norm(String(t.personaje ?? ""));
     const player = players.find((p) => norm(p.character) === name) ?? players.find((p) => name && (norm(p.character).startsWith(name) || name.startsWith(norm(p.character))));
     if (!player || out.some((r) => r.user_id === player.user_id)) continue;
+    if (t.categoria === "conjuro") {
+      const spell = spellRequest(player, t);
+      if (spell) out.push(spell);
+      continue;
+    }
     const check = toCheck(t);
     if (!check) continue;
 

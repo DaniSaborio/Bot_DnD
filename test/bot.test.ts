@@ -567,3 +567,98 @@ test("los PNJ quedan en Obsidian y los compañeros nunca se olvidan", async () =
   assert.equal(greta.acompana, false);
   assert.ok(greta.notas.some((n) => n.endsWith("volvió al castillo")));
 });
+
+// ---------- conjuros ----------
+
+const KAEL_BARDO_SHEET = `Kael Windwhistle - Semielfo Bardo 1 (Artista)
+CA 14 · HP 10/10 · Inci +3 · Vel 30 · Comp +2
+Conjuros (CD 13, Atq +5): Trucos (Burla dañina, Ilusión menor, Mensaje), Nivel 1 (Dormir, Palabra de curación, Risa horrible de Tasha, Susurros disonantes)`;
+
+test("tabla de conjuros: nombres alternativos y dados según el nivel", async () => {
+  const { findSpell, spellDice, addDice } = await import("../src/spells");
+  assert.equal(findSpell("Sueño")?.nombre, "Dormir");
+  assert.equal(findSpell("sleep")?.nombre, "Dormir");
+  assert.equal(findSpell("Misil mágico")?.nombre, "Proyectil mágico");
+  assert.equal(findSpell("Risa espantosa de Tasha")?.nombre, "Risa horrible de Tasha");
+  const sleep = findSpell("Dormir")!;
+  assert.equal(sleep.tipo, "efecto", "Dormir no se tira con d20");
+  assert.equal(spellDice(sleep, 1, 1, 3), "5d8");
+  assert.equal(spellDice(sleep, 2, 3, 3), "7d8", "+2d8 por cada nivel de espacio extra");
+  assert.equal(spellDice(findSpell("Proyectil mágico")!, 2, 3, 0), "4d4+4");
+  assert.equal(spellDice(findSpell("Rayo de fuego")!, 0, 5, 0), "2d10", "los trucos escalan con el nivel del personaje");
+  assert.equal(spellDice(findSpell("Palabra de curación")!, 1, 1, 3), "1d4+3");
+  assert.equal(addDice("8d6", "1d6", 2), "10d6");
+});
+
+test("CD y ataque de conjuros: de la ficha, o calculados con la característica de la clase", async () => {
+  const { casterNumbers } = await import("../src/spells");
+  const stats = statsFromImport({ caracteristicas: { fue: 8, des: 16, con: 14, int: 10, sab: 10, car: 17 }, competencia: 2 }).stats;
+  assert.deepEqual(
+    (({ cd, ataque, nivel }) => ({ cd, ataque, nivel }))(casterNumbers(stats, KAEL_BARDO_SHEET, "Semielfo, Bardo 1")!),
+    { cd: 13, ataque: 5, nivel: 1 },
+  );
+  const computed = casterNumbers(stats, "Equipo: laúd", "Semielfo, Bardo 1")!;
+  assert.equal(computed.cd, 8 + 2 + 3, "bardo usa CAR");
+  assert.match(computed.source, /calculado: CAR \+3/);
+});
+
+test("lanzar conjuros: Dormir tira 5d8 sin d20, Retener persona hace tirar al objetivo, Rayo de fuego es un ataque", async () => {
+  const ch = await newChannel();
+  const stats = statsFromImport({ caracteristicas: { fue: 8, des: 16, con: 14, int: 10, sab: 10, car: 17 }, competencia: 2, hp_max: 10 }).stats;
+  await db.savePlayerSheet(ch, "222", "Lyra", "Semielfo, Bardo 1", KAEL_BARDO_SHEET, "PDF", stats);
+  const spell = (conjuro: string, extra: object = {}) => ({
+    personaje: "Lyra", categoria: "conjuro", habilidad: "", caracteristica: "", arma: "", cd: 0, ventaja: "normal", motivo: "",
+    conjuro, nivel_espacio: 1, tipo_conjuro: "", salvacion_conjuro: "", dados_conjuro: "", bono_salvacion_objetivo: 0, ...extra,
+  });
+
+  const cast = async (reply: object) => {
+    await db.addPending(ch, "111", "Kael: espero");
+    await db.addPending(ch, "222", "Lyra: lanzo un conjuro");
+    arbiterReply = { tiradas: [reply] };
+    const adv = await advance(env, ch);
+    assert.equal(adv.kind, "rolls");
+    return (adv as { rolls: db.RollRequest[] }).rolls[0];
+  };
+
+  const sleep = await cast(spell("Dormir", { dados_conjuro: "1d20" }));
+  assert.equal(sleep.dados, "5d8", "la tabla manda sobre lo que diga el árbitro");
+  assert.equal(sleep.conjuro?.tipo, "efecto");
+  assert.match(sleep.fuente!, /CD 13 · ataque \+5 \(según tu ficha\)/);
+  const s1 = await resolveRoll(ch, "222", { rollId: sleep.id });
+  assert.match(s1!.display, /✨ \*\*Lyra\*\* lanza \*\*Dormir\*\* \(nivel 1\): `5d8` .* = \*\*\d+\*\* puntos de golpe de criaturas que se duermen/);
+  assert.doesNotMatch(s1!.display, /1d20/);
+  await runTurn(env, ch);
+
+  const hold = await cast(spell("Risa horrible de Tasha", { bono_salvacion_objetivo: 1 }));
+  assert.equal(hold.conjuro?.tipo, "salvacion");
+  assert.equal(hold.dados, "1d20+1", "tira el objetivo, con su bonificador");
+  assert.equal(hold.cd, 13, "contra la CD del lanzador");
+  const h1 = await resolveRoll(ch, "222", { rollId: hold.id });
+  assert.match(h1!.display, /el objetivo tira salvación de SAB `1d20\+1`.* vs tu CD 13 → /);
+  await runTurn(env, ch);
+
+  const bolt = await cast(spell("Rayo de fuego", { cd: 12, nivel_espacio: 0 }));
+  assert.equal(bolt.conjuro?.tipo, "ataque");
+  assert.equal(bolt.dados, "1d20+5", "ataque de conjuro de la ficha");
+  assert.equal(bolt.dano, "1d10");
+  assert.match(bolt.fuente!, /Rayo de fuego no figura en tu ficha/);
+  await resolveRoll(ch, "222", { rollId: bolt.id });
+  await runTurn(env, ch);
+
+  const whispers = await cast(spell("Susurros disonantes", { nivel_espacio: 2 }));
+  assert.equal(whispers.dano, "4d6", "nivel 2: +1d6");
+  assert.equal(whispers.conjuro?.mitad, true);
+});
+
+test("Engañar se reconoce como Engaño (antes quedaba sin competencia)", () => {
+  const r = statsFromImport({ caracteristicas: { fue: 8, des: 16, con: 14, int: 10, sab: 10, car: 17 }, competencia: 2, habilidades: { Engañar: 5 } });
+  assert.equal(bonusFor(r.stats!, { categoria: "habilidad", habilidad: "Engaño" }).value, 5);
+  assert.equal(statsFromProps({ ...statsToProps(r.stats!), habilidades: ["Engañar +5"] })!.habilidades["Engaño"], 5);
+});
+
+test("objetos repetidos se suman como cantidad", () => {
+  let st = applyOps(emptyState(), [{ kind: "item", add: true, name: "Antorcha" }, { kind: "item", add: true, name: "antorcha" }, { kind: "item", add: true, name: "Antorcha (3)" }]);
+  assert.deepEqual(st.inventario, ["Antorcha (5)"]);
+  st = applyOps(st, [{ kind: "item", add: false, name: "Antorcha" }]);
+  assert.deepEqual(st.inventario, ["Antorcha (4)"]);
+});

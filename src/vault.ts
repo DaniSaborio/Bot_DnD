@@ -53,6 +53,15 @@ export interface RollRequest {
   motivo: string;
   /** De dónde sale el bonificador, para mostrarlo en la tirada. */
   fuente?: string;
+  /** Si es un conjuro: cómo se resuelve. En "salvacion", `dados` es la salvación del OBJETIVO y `cd` la del lanzador. */
+  conjuro?: {
+    tipo: "ataque" | "salvacion" | "efecto";
+    nivel: number;
+    salvacion?: string;
+    mitad?: boolean;
+    curacion?: boolean;
+    efecto?: string;
+  };
 }
 
 const CAMPAIGN_FILE = "Campaña.md";
