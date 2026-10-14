@@ -9,6 +9,7 @@ import { fetchNivel20Sheet } from "./nivel20";
 import { fetchPdfText, type DiscordAttachment } from "./pdf";
 import { statsFromImport, type Stats } from "./stats";
 import { extractChanges, describeChanges } from "./changes";
+import { extractNpcs, describeNpcs, npcContext } from "./npcs";
 import { mergeStats } from "./sheetparse";
 
 export interface GameEnv extends AIEnv {
@@ -46,7 +47,7 @@ export async function runTurn(env: GameEnv, ch: string, instruction?: string): P
   if (!(await db.tryLock(ch))) return "⏳ El DM ya está narrando; esperen un momento.";
 
   try {
-    const [pending, rolls, players, history] = await Promise.all([db.getPending(ch), db.getRollRequests(ch), db.getPlayers(ch), db.getMessages(ch)]);
+    const [pending, rolls, players, history, npcs] = await Promise.all([db.getPending(ch), db.getRollRequests(ch), db.getPlayers(ch), db.getMessages(ch), db.getNpcs(ch)]);
 
     const lines = pending.map((p) => p.content);
     for (const r of rolls) lines.push(`(${r.character} no llegó a tirar ${r.tipo}.)`);
@@ -58,20 +59,32 @@ export async function runTurn(env: GameEnv, ch: string, instruction?: string): P
     const raw = await callAI(
       env,
       "narrar",
-      dmSystemPrompt(camp, players),
+      dmSystemPrompt(camp, players, npcContext(npcs, [...history.slice(-4).map((m) => m.content), userBlock].join("\n"))),
       [...history.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: `${userBlock}\n[Extensión: ${length.hint}]` }],
       length.tokens,
     );
 
-    // El bloque [cambios] no se publica: se escribe en la nota de cada personaje.
-    const { text: narration, changes } = extractChanges(raw, players.map((p) => p.character));
+    // Los bloques [cambios] y [npcs] no se publican: se escriben en las notas de Obsidian.
+    const { text: narration, notes } = await record(ch, raw, players);
     const maxId = pending.length ? pending[pending.length - 1].id : 0;
     await db.commitTurn(ch, userBlock, narration, maxId);
-    const applied = changes.length ? await db.applyChanges(ch, changes) : [];
-    return applied.length ? `${narration}\n-# 📝 Anotado en la hoja: ${describeChanges(applied)}` : narration;
+    return notes ? `${narration}\n${notes}` : narration;
   } finally {
     await db.unlock(ch);
   }
+}
+
+/** Saca los bloques [cambios] y [npcs] de una respuesta, los guarda y devuelve el texto limpio y lo que se anotó. */
+async function record(ch: string, raw: string, players: db.Player[]): Promise<{ text: string; notes: string }> {
+  const items = extractChanges(raw, players.map((p) => p.character));
+  const people = extractNpcs(items.text);
+  const applied = items.changes.length ? await db.applyChanges(ch, items.changes) : [];
+  const npcResults = people.updates.length ? await db.applyNpcUpdates(ch, people.updates) : [];
+  const lines = [];
+  if (applied.length) lines.push(`-# 📝 Anotado en la hoja: ${describeChanges(applied)}`);
+  const npcLine = describeNpcs(npcResults);
+  if (npcLine) lines.push(`-# 👥 ${npcLine}`);
+  return { text: people.text, notes: lines.join("\n") };
 }
 
 export type Advance = { kind: "text"; text: string } | { kind: "rolls"; rolls: db.RollRequest[] };
@@ -145,13 +158,13 @@ export async function resolveRoll(ch: string, userId: string, by: { rollId: numb
 export async function askOoc(env: GameEnv, ch: string, character: string, question: string): Promise<string> {
   const camp = await db.getCampaign(ch);
   if (!camp) return "No hay campaña en este canal. Empiecen una con `/campaña`.";
-  const [players, history] = await Promise.all([db.getPlayers(ch), db.getMessages(ch)]);
+  const [players, history, npcs] = await Promise.all([db.getPlayers(ch), db.getMessages(ch), db.getNpcs(ch)]);
   const recent = history.slice(-4).map((m) => ({ role: m.role, content: m.content }));
-  const raw = await callAI(env, "liviano", oocSystemPrompt(camp, players), [...recent, { role: "user", content: `[Fuera de personaje] ${character} pregunta: ${question}` }], 600);
-  // Si el jugador pidió anotar algo que pasó en la partida, se escribe en su hoja.
-  const { text, changes } = extractChanges(raw, players.map((p) => p.character));
-  const applied = changes.length ? await db.applyChanges(ch, changes) : [];
-  return applied.length ? `${text}\n-# 📝 Anotado en la hoja: ${describeChanges(applied)}` : text;
+  const context = npcContext(npcs, [...recent.map((m) => m.content), question].join("\n"), 15);
+  const raw = await callAI(env, "liviano", oocSystemPrompt(camp, players, context), [...recent, { role: "user", content: `[Fuera de personaje] ${character} pregunta: ${question}` }], 600);
+  // Si el jugador pidió anotar algo que pasó en la partida, se escribe en su hoja (o en la nota del PNJ).
+  const { text, notes } = await record(ch, raw, players);
+  return notes ? `${text}\n${notes}` : text;
 }
 
 export interface ImportedSheet {

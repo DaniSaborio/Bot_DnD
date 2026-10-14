@@ -71,6 +71,9 @@ DnD/
     ├── Personajes/
     │   ├── Kael.md       ficha de cada personaje
     │   └── Lyra.md
+    ├── NPCs/
+    │   ├── Greta.md      un archivo por PNJ: rol, actitud, si acompaña al grupo y sus apariciones
+    │   └── Barón de Oakhaven.md
     └── Archivo/          campañas anteriores de este canal
 ```
 
@@ -78,6 +81,7 @@ DnD/
 - **Números de la ficha** (`Personajes/*.md`, en las propiedades de arriba): `fue`, `des`… (puntuaciones), `competencia`, `ca`, `hp_max`, y las listas `salvaciones`, `habilidades` y `ataques` (ej. `Sigilo +7`, `Daga +5 · 1d4+3`). Son los que usa el bot para cada tirada: si algo está mal, corregilo ahí.
 - **Ficha en texto** (`Personajes/*.md`, debajo de `## Ficha`): rasgos, conjuros, equipo. Agregá un objeto mágico o lo que quieras.
 - **Lo que pasa en la campaña** (`Personajes/*.md`, propiedades `inventario`, `hp_actual`, `po`/`pp`/`pc`…, `condiciones`, `objetos_perdidos`): se actualiza **solo** durante la partida. Cuando tu personaje agarra, compra o recibe un objeto, gasta o gana dinero, recibe daño o curación, o queda envenenado, el DM lo anota y el bot lo escribe en tu nota (también se ve en la sección `## En la campaña`). En Discord aparece una línea `📝 Anotado en la hoja: …` para que sepas qué se guardó. Si algo quedó mal, corregí la propiedad a mano. Volver a hacer `/importar` (por ejemplo al subir de nivel) conserva todo esto.
+- **PNJ** (`NPCs/*.md`): cuando aparece un PNJ con nombre, se une al grupo, lo deja, cambia de actitud o muere, el DM lo anota solo (en Discord aparece `👥 Greta se une al grupo`). Propiedades editables: `acompana` (sí/no), `rol`, `descripcion`, `actitud`, `estado`, `lugar`, y abajo el registro de `## Apariciones`. **Los que acompañan al grupo van siempre en el contexto del DM**, así no se olvidan aunque nadie los nombre; el resto entra solo cuando se los menciona, para no gastar tokens. Podés crear o corregir un PNJ a mano, o pedirlo con `/ooc` ("anotá a Greta como compañera"). `/estado` muestra quién los acompaña.
 - **Resumen** (`Campaña.md`): lo que esté debajo de `## Resumen` es la memoria del DM. Podés agregar notas propias (NPCs, secretos, ganchos de trama).
 - **Historial**: se puede leer y releer como el diario de la partida. Si lo editás, no borres las marcas `<!-- msg N ... -->` (en modo lectura no se ven); son las que usa el bot para separar los turnos.
 

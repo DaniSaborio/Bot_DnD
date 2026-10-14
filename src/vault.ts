@@ -12,6 +12,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { statsFromProps, statsToProps, norm, type Stats } from "./stats";
+import { applyNpcUpdate, type Npc, type NpcUpdate } from "./npcs";
 import { applyOps, emptyState, moneyFromSheet, stateFromProps, stateToProps, COINS, type CampaignState, type Change } from "./changes";
 
 export interface Campaign {
@@ -58,6 +59,8 @@ const CAMPAIGN_FILE = "Campaña.md";
 const HISTORY_FILE = "Historial.md";
 const PENDING_FILE = "Pendientes.md";
 const PLAYERS_DIR = "Personajes";
+const NPCS_DIR = "NPCs";
+const NPC_LOG_HEADING = "## Apariciones";
 const ARCHIVE_DIR = "Archivo";
 const SUMMARY_HEADING = "## Resumen";
 const SHEET_HEADING = "## Ficha";
@@ -321,6 +324,85 @@ export function applyChanges(ch: string, changes: Change[]): Promise<Change[]> {
       applied.push(change);
     }
     return applied;
+  });
+}
+
+// ---------- PNJ ----------
+
+async function readNpcFiles(ch: string): Promise<{ file: string; npc: Npc }[]> {
+  const dir = await findChannelDir(ch);
+  if (!dir) return [];
+  const ndir = path.join(dir, NPCS_DIR);
+  const names = await fs.readdir(ndir).catch(() => [] as string[]);
+  const out = [];
+  for (const name of names.filter((n) => n.endsWith(".md"))) {
+    const file = path.join(ndir, name);
+    const text = await readFile(file);
+    if (text == null) continue;
+    const { meta, body } = parseNote(text);
+    const notas = section(body, NPC_LOG_HEADING)
+      .split("\n")
+      .map((l) => l.replace(/^\s*[-*]\s*/, "").trim())
+      .filter(Boolean);
+    const acompana = meta.acompana === true || /^(si|sí|true|yes)$/i.test(str(meta.acompana));
+    out.push({
+      file,
+      npc: {
+        nombre: str(meta.nombre) || name.replace(/\.md$/, ""),
+        acompana,
+        rol: str(meta.rol),
+        descripcion: str(meta.descripcion),
+        actitud: str(meta.actitud),
+        estado: str(meta.estado) || "vivo",
+        lugar: str(meta.lugar),
+        notas,
+      },
+    });
+  }
+  return out;
+}
+
+async function writeNpc(ch: string, n: Npc, previousFile?: string) {
+  const dir = await channelDir(ch);
+  const file = path.join(dir, NPCS_DIR, `${safeName(n.nombre)}.md`);
+  const meta = { nombre: n.nombre, acompana: n.acompana, rol: n.rol, descripcion: n.descripcion, actitud: n.actitud, estado: n.estado, lugar: n.lugar };
+  const desc = n.descripcion ? `> ${n.descripcion}\n\n` : "";
+  const status = n.acompana ? "**Acompaña al grupo.**\n\n" : "";
+  const body = `# ${n.nombre}\n\n${desc}${status}${NPC_LOG_HEADING}\n\n${n.notas.map((x) => `- ${x}`).join("\n")}\n`;
+  await writeFile(file, renderNote(meta, body));
+  if (previousFile && previousFile !== file) await fs.rm(previousFile, { force: true });
+}
+
+const sameNpc = (a: string, b: string) => {
+  const x = norm(a);
+  const y = norm(b);
+  return x === y || x.startsWith(y + " ") || y.startsWith(x + " ");
+};
+
+export async function getNpcs(ch: string): Promise<Npc[]> {
+  return (await readNpcFiles(ch)).map((f) => f.npc).sort((a, b) => Number(b.acompana) - Number(a.acompana) || a.nombre.localeCompare(b.nombre));
+}
+
+/** Crea o actualiza las notas de los PNJ. Devuelve cómo estaban antes y después, para avisar en Discord. */
+export function applyNpcUpdates(ch: string, updates: NpcUpdate[]): Promise<{ before: Npc | null; after: Npc }[]> {
+  return serialize(ch, async () => {
+    const files = await readNpcFiles(ch);
+    const when = new Date().toLocaleDateString("es", { dateStyle: "short" });
+    const out: { before: Npc | null; after: Npc }[] = [];
+    for (const u of updates) {
+      const f = files.find((x) => sameNpc(x.npc.nombre, u.nombre));
+      const before = f?.npc ?? null;
+      const after = applyNpcUpdate(before, u, when);
+      const dir = await channelDir(ch);
+      const file = path.join(dir, NPCS_DIR, `${safeName(after.nombre)}.md`);
+      await writeNpc(ch, after, f?.file);
+      if (f) {
+        f.npc = after;
+        f.file = file;
+      } else files.push({ file, npc: after });
+      out.push({ before, after });
+    }
+    return out;
   });
 }
 

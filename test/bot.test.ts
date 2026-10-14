@@ -510,3 +510,60 @@ test("/ooc puede anotar en la hoja lo que el jugador pide y pasó en la partida"
   assert.deepEqual((await db.getPlayer(ch, "111"))!.state.inventario, ["Poción de curación"]);
   assert.match(calls.at(-1)!.body.systemInstruction.parts[0].text, /ESTADO ACTUAL DE CADA PERSONAJE/);
 });
+
+// ---------- PNJ ----------
+
+test("el bloque [npcs] se entiende y no se publica", async () => {
+  const { extractNpcs } = await import("../src/npcs");
+  const { text, updates } = extractNpcs(`Greta acepta y toma su abrigo.
+
+[npcs]
+- **Greta** | acompaña: sí | rol: guía e informante | descripción: sirvienta del castillo
+Maese Torvald | actitud: amistosa | nota: les ofreció forjar un hacha
+Solo nombre
+[/npcs]`);
+  assert.equal(text, "Greta acepta y toma su abrigo.");
+  assert.deepEqual(updates, [
+    { nombre: "Greta", acompana: true, rol: "guía e informante", descripcion: "sirvienta del castillo" },
+    { nombre: "Maese Torvald", actitud: "amistosa", nota: "les ofreció forjar un hacha" },
+  ]);
+});
+
+test("los PNJ quedan en Obsidian y los compañeros nunca se olvidan", async () => {
+  const ch = await newChannel();
+  geminiStatus = 200;
+  await db.addPending(ch, "111", "Kael: le pido a Greta que nos acompañe");
+  nextNarration = "Greta acepta.\n\n[npcs]\nGreta | acompaña: sí | rol: guía | descripción: sirvienta del castillo\n[/npcs]";
+  const shown = await runTurn(env, ch);
+  assert.equal(shown, "Greta acepta.\n-# 👥 Greta se une al grupo");
+
+  const dir = (await fs.readdir(root)).find((d) => d.endsWith(`(${ch})`))!;
+  const note = await fs.readFile(path.join(root, dir, "NPCs", "Greta.md"), "utf8");
+  assert.match(note, /acompana: true/);
+  assert.match(note, /## Apariciones\n\n- .* — se une al grupo/);
+
+  // Muchos turnos después, aunque nadie la nombre, el narrador sigue sabiendo que está con ellos
+  for (let i = 0; i < 3; i++) {
+    await db.addPending(ch, "111", `Kael: camino ${i}`);
+    await runTurn(env, ch);
+  }
+  const system: string = calls.at(-1)!.body.systemInstruction.parts[0].text;
+  assert.match(system, /PNJ QUE ACOMPAÑAN AL GRUPO[\s\S]*- Greta: guía · sirvienta del castillo/);
+
+  // Un PNJ no compañero solo entra al contexto si se lo nombra
+  await db.applyNpcUpdates(ch, [{ nombre: "Maese Torvald", rol: "herrero" }]);
+  await db.addPending(ch, "111", "Kael: sigo caminando");
+  await runTurn(env, ch);
+  assert.doesNotMatch(calls.at(-1)!.body.systemInstruction.parts[0].text, /PNJ CONOCIDOS/, "no se nombró: no gasta tokens");
+  await db.addPending(ch, "111", "Kael: vuelvo a ver a Torvald");
+  await runTurn(env, ch);
+  assert.match(calls.at(-1)!.body.systemInstruction.parts[0].text, /PNJ CONOCIDOS[\s\S]*Maese Torvald: herrero/);
+
+  // Deja el grupo
+  nextNarration = "Greta se despide.\n[npcs]\nGreta | acompaña: no | nota: volvió al castillo\n[/npcs]";
+  await db.addPending(ch, "111", "Kael: le pago a Greta y la despido");
+  assert.match(await runTurn(env, ch), /👥 Greta deja el grupo/);
+  const greta = (await db.getNpcs(ch)).find((n) => n.nombre === "Greta")!;
+  assert.equal(greta.acompana, false);
+  assert.ok(greta.notas.some((n) => n.endsWith("volvió al castillo")));
+});

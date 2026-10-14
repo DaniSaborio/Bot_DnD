@@ -304,6 +304,11 @@ async function handleCommand(i: ChatInputCommandInteraction) {
         `**Acciones pendientes:** ${pending.length ? "\n" + pending.map((p) => `• ${p.content}`).join("\n") : "ninguna"}`,
       ];
       if (rolls.length) lines.push(`**Tiradas por hacer:** ${rolls.map((r) => `${r.character} (${r.tipo})`).join(", ")}`);
+      const npcs = await db.getNpcs(ch);
+      const companions = npcs.filter((n) => n.acompana);
+      if (companions.length) lines.push(`**Los acompañan:** ${companions.map((n) => `${n.nombre}${n.rol ? ` (${n.rol})` : ""}`).join(", ")}`);
+      const others = npcs.filter((n) => !n.acompana);
+      if (others.length) lines.push(`**PNJ conocidos:** ${others.map((n) => n.nombre).join(", ")}`);
       if (camp.summary) lines.push(`**Resumen:**\n${camp.summary}`);
       return reply(i, lines.join("\n"), true);
     }
