@@ -53,6 +53,8 @@ export interface RollRequest {
   motivo: string;
   /** De dónde sale el bonificador, para mostrarlo en la tirada. */
   fuente?: string;
+  /** Ataque cuerpo a cuerpo contra un objetivo dormido, inconsciente o paralizado: si pega, es crítico. */
+  critico_auto?: boolean;
   /** Si es un conjuro: cómo se resuelve. En "salvacion", `dados` es la salvación del OBJETIVO y `cd` la del lanzador. */
   conjuro?: {
     tipo: "ataque" | "salvacion" | "efecto";
@@ -491,6 +493,22 @@ export function setRollRequests(ch: string, rolls: Omit<RollRequest, "id">[]): P
     state.rolls = rolls.map((r, i) => ({ ...r, id: base + i }));
     await writePendingState(ch, state);
     return state.rolls;
+  });
+}
+
+/** Un jugador corrige su acción mientras se esperaba su tirada: se borran su acción anterior y su tirada pedida. */
+export function dropPlayerPending(ch: string, userId: string): Promise<void> {
+  return serialize(ch, async () => {
+    const state = await readPendingState(ch);
+    await writePendingState(ch, { actions: state.actions.filter((a) => a.user_id !== userId), rolls: state.rolls.filter((r) => r.user_id !== userId) });
+  });
+}
+
+/** Descarta todas las tiradas pedidas (para que el árbitro vuelva a decidir). */
+export function clearRollRequests(ch: string): Promise<void> {
+  return serialize(ch, async () => {
+    const state = await readPendingState(ch);
+    await writePendingState(ch, { actions: state.actions, rolls: [] });
   });
 }
 

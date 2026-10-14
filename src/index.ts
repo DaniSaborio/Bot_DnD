@@ -16,7 +16,7 @@ import * as db from "./vault";
 import { rollDice } from "./dice";
 import { checkUrl } from "./nivel20";
 import { checkAttachment } from "./pdf";
-import { runTurn, advance, resolveRoll, askOoc, maybeCompact, importSheet, quotaReport, type GameEnv, type SheetSource } from "./game";
+import { runTurn, advance, forceNarrate, resolveRoll, askOoc, maybeCompact, importSheet, quotaReport, type GameEnv, type SheetSource } from "./game";
 import { initQuota } from "./quota";
 import { statsSummary } from "./stats";
 import { stateLine } from "./changes";
@@ -251,7 +251,15 @@ async function handleCommand(i: ChatInputCommandInteraction) {
       const player = await db.getPlayer(ch, userId);
       if (!player) return reply(i, "Primero traé tu personaje con `/importar` (PDF de tu ficha) o `/unirse`.", true);
       const text = o.getString("texto", true).trim().slice(0, 1000);
-      return registerAndMaybeNarrate(i, ch, userId, `${player.character}: ${text}`, `📝 **${player.character}**: ${text}`);
+      // Si se esperaba una tirada suya, la acción nueva reemplaza a la anterior y el árbitro vuelve a decidir.
+      const replaced = (await db.getRollRequests(ch)).some((r) => r.user_id === userId);
+      if (replaced) {
+        // El árbitro vuelve a decidir con la acción nueva (las tiradas ya hechas quedan como resultado y no se repiten).
+        await db.dropPlayerPending(ch, userId);
+        await db.clearRollRequests(ch);
+      }
+      const header = `📝 **${player.character}**: ${text}${replaced ? "\n-# Reemplaza tu acción anterior y su tirada" : ""}`;
+      return registerAndMaybeNarrate(i, ch, userId, `${player.character}: ${text}`, header);
     }
 
     case "tirar": {
@@ -288,7 +296,12 @@ async function handleCommand(i: ChatInputCommandInteraction) {
     case "narrar":
       return deferAndRun(
         i,
-        () => runTurn(env, ch),
+        async () => {
+          const { auto, result } = await forceNarrate(env, ch);
+          const head = auto.length ? `${auto.join("\n")}\n\n` : "";
+          if (result.kind === "rolls") return { text: `${head}${rollsMessage(result.rolls)}`, rolls: result.rolls };
+          return `${head}${result.text}`;
+        },
         () => maybeCompact(env, ch),
       );
 
@@ -296,7 +309,12 @@ async function handleCommand(i: ChatInputCommandInteraction) {
       const player = await db.getPlayer(ch, userId);
       const question = o.getString("pregunta", true).trim().slice(0, 1000);
       const who = player?.character ?? "Un jugador";
-      return deferAndRun(i, async () => `💬 **${who}** (fuera de personaje): ${question}\n\n${await askOoc(env, ch, who, question)}`);
+      return deferAndRun(i, async () => {
+        const r = await askOoc(env, ch, who, question);
+        const head = `💬 **${who}** (fuera de personaje): ${question}\n\n`;
+        if (r.kind === "rolls") return { text: `${head}${r.text ?? ""}\n\n${rollsMessage(r.rolls)}`, rolls: r.rolls };
+        return `${head}${r.text}`;
+      });
     }
 
     case "cuota":

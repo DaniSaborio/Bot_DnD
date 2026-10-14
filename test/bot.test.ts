@@ -22,6 +22,7 @@ Ataques: Espada larga +5, 1d8+3 cortante; Arco largo +3, 1d8+1`;
 const calls: { service: "gemini" | "ollama"; model: string; body: any }[] = [];
 let geminiStatus = 200;
 let arbiterReply: object = { tiradas: [] };
+let enemyReply: object = { ataques: [] };
 let narration = 0;
 /** Si se define, el próximo pedido de narración a Gemini devuelve este texto. */
 let nextNarration: string | null = null;
@@ -41,7 +42,8 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }));
   }
   calls.push({ service: "ollama", model: body.model, body });
-  const text = body.format && body.format !== "json" ? JSON.stringify(arbiterReply) : `Narración local ${++narration}`;
+  const isEnemy = body.format && body.format !== "json" && body.format.properties?.ataques;
+  const text = isEnemy ? JSON.stringify(enemyReply) : body.format && body.format !== "json" ? JSON.stringify(arbiterReply) : `Narración local ${++narration}`;
   return new Response(JSON.stringify({ message: { content: text } }));
 }) as typeof fetch;
 
@@ -505,7 +507,7 @@ test("/ooc puede anotar en la hoja lo que el jugador pide y pasó en la partida"
   const ch = await newChannel();
   geminiStatus = 200;
   nextNarration = "Listo, anoté la poción.\n[cambios]\nKael: +objeto Poción de curación\n[/cambios]";
-  const answer = await askOoc(env, ch, "Kael", "anotaste la poción que compré?");
+  const answer = ((await askOoc(env, ch, "Kael", "anotaste la poción que compré?")) as { text: string }).text;
   assert.match(answer, /^Listo, anoté la poción\.\n-# 📝 Anotado en la hoja: Kael: \+Poción de curación$/);
   assert.deepEqual((await db.getPlayer(ch, "111"))!.state.inventario, ["Poción de curación"]);
   assert.match(calls.at(-1)!.body.systemInstruction.parts[0].text, /ESTADO ACTUAL DE CADA PERSONAJE/);
@@ -661,4 +663,132 @@ test("objetos repetidos se suman como cantidad", () => {
   assert.deepEqual(st.inventario, ["Antorcha (5)"]);
   st = applyOps(st, [{ kind: "item", add: false, name: "Antorcha" }]);
   assert.deepEqual(st.inventario, ["Antorcha (4)"]);
+});
+
+// ---------- peleas: no se saltan tiradas ----------
+
+const noSpell = { conjuro: "", nivel_espacio: 0, tipo_conjuro: "", salvacion_conjuro: "", dados_conjuro: "", bono_salvacion_objetivo: 0 };
+
+test("/narrar no se saltea las reglas: tira por quien no tocó su botón y después narra", async () => {
+  const { forceNarrate } = await import("../src/game");
+  const ch = await newChannel();
+  await db.addPending(ch, "111", "Kael: ataco al bandido");
+  await db.addPending(ch, "222", "Lyra: espero");
+  arbiterReply = { en_combate: false, tiradas: [{ personaje: "Kael", categoria: "ataque", habilidad: "", caracteristica: "", arma: "espada larga", cd: 12, ventaja: "normal", motivo: "", objetivo_indefenso: false, ...noSpell }] };
+  assert.equal((await advance(env, ch)).kind, "rolls");
+  const { auto, result } = await forceNarrate(env, ch);
+  assert.equal(auto.length, 1);
+  assert.match(auto[0], /Kael\*\* tira Ataque con Espada larga[\s\S]*el bot tiró por él/);
+  assert.equal(result.kind, "text");
+  const turn: string = calls.at(-1)!.body.contents.at(-1).parts[0].text;
+  assert.match(turn, /Kael tira Ataque con Espada larga 1d20\+5: .* vs CD 12 → /, "el narrador recibe el resultado real, no 'no llegó a tirar'");
+});
+
+test("/narrar con acciones que el árbitro no vio: pasan por el árbitro", async () => {
+  const { forceNarrate } = await import("../src/game");
+  const ch = await newChannel();
+  await db.addPending(ch, "111", "Kael: ataco a la alimaña con mi espada");
+  arbiterReply = { en_combate: true, tiradas: [{ personaje: "Kael", categoria: "ataque", habilidad: "", caracteristica: "", arma: "espada larga", cd: 11, ventaja: "normal", motivo: "", objetivo_indefenso: false, ...noSpell }] };
+  const { result } = await forceNarrate(env, ch);
+  assert.equal(result.kind, "rolls", "pide la tirada en vez de narrar directo");
+});
+
+test("todo ataque lleva tirada: si el árbitro no la pide, el código la agrega (con ventaja y crítico contra un objetivo dormido)", async () => {
+  const ch = await newChannel();
+  await db.commitTurn(ch, "Kael: lanzo Dormir", "Las tres alimañas caen dormidas sobre la piedra. ¿Qué hacen?", 0);
+  await db.addPending(ch, "111", "Kael: ataco una de las alimañas con mi espada larga");
+  await db.addPending(ch, "222", "Lyra: vigilo");
+  arbiterReply = { en_combate: true, tiradas: [] }; // el modelo chico "se olvidó"
+  const adv = await advance(env, ch);
+  assert.equal(adv.kind, "rolls");
+  const r = (adv as { rolls: db.RollRequest[] }).rolls[0];
+  assert.equal(r.tipo, "Ataque con Espada larga");
+  assert.equal(r.dados, "2d20kh1+5", "ventaja contra un objetivo dormido");
+  assert.equal(r.critico_auto, true);
+  assert.match(r.fuente!, /el árbitro no la pidió/);
+});
+
+test("turno de los enemigos: el código tira contra la CA real y descuenta los HP", async () => {
+  const ch = await newChannel();
+  geminiStatus = 200;
+  await db.addPending(ch, "111", "Kael: levanto el escudo y me cubro");
+  await db.addPending(ch, "222", "Lyra: me escondo");
+  arbiterReply = { en_combate: true, tiradas: [] };
+  enemyReply = { ataques: [{ atacante: "Bandido", objetivo: "Kael", arma: "cimitarra", bono: 30, dano: "1d2+4", ventaja: "normal" }] };
+  const realRandom = Math.random;
+  Math.random = () => 0.5; // ni 1 ni 20 natural
+  try {
+    const shown = await advance(env, ch);
+    assert.equal(shown.kind, "text");
+    const text = (shown as { text: string }).text;
+    assert.match(text, /^⚔️ \*\*Bandido\*\* ataca a \*\*Kael\*\* con cimitarra: `1d20\+12` .* vs CA 18 → 💥 \*\*6\*\* de daño/, "el bono se limita a +12 y pega contra CA 18");
+  } finally {
+    Math.random = realRandom;
+    enemyReply = { ataques: [] };
+  }
+  assert.equal((await db.getPlayer(ch, "111"))!.state.hp_actual, 22, "28 - 6");
+  const turn: string = calls.at(-1)!.body.contents.at(-1).parts[0].text;
+  assert.match(turn, /\[Turno de los enemigos, ya tirado por el bot\]\nBandido ataca a Kael con cimitarra 1d20\+12: .* vs CA 18 → impacta, 6 de daño/);
+});
+
+test("corregir la acción mientras se esperaba su tirada: el árbitro vuelve a decidir", async () => {
+  const ch = await newChannel();
+  await db.addPending(ch, "111", "Kael: lanzo Dormir");
+  await db.setRollRequests(ch, [{ user_id: "111", character: "Kael", tipo: "Ataque con Dormir", dados: "1d20+5", cd: 12, dano: "", motivo: "" }]);
+  await db.dropPlayerPending(ch, "111");
+  await db.clearRollRequests(ch);
+  assert.equal((await db.getPending(ch)).length, 0);
+  assert.equal((await db.getRollRequests(ch)).length, 0);
+});
+
+test("/ooc: si la tirada pedida estaba mal, el árbitro la vuelve a decidir", async () => {
+  const { askOoc } = await import("../src/game");
+  const ch = await newChannel();
+  await db.addPending(ch, "111", "Kael: ataco al orco");
+  await db.addPending(ch, "222", "Lyra: espero");
+  await db.setRollRequests(ch, [{ user_id: "111", character: "Kael", tipo: "Atletismo", dados: "1d20+5", cd: 15, dano: "", motivo: "" }]);
+  nextNarration = "Tenés razón: un ataque es una tirada de ataque, no de Atletismo. [repetir_tiradas]";
+  arbiterReply = { en_combate: true, tiradas: [{ personaje: "Kael", categoria: "ataque", habilidad: "", caracteristica: "", arma: "espada larga", cd: 13, ventaja: "normal", motivo: "", objetivo_indefenso: false, ...noSpell }] };
+  const r = await askOoc(env, ch, "Kael", "esa tirada está mal, es un ataque");
+  assert.equal(r.kind, "rolls");
+  assert.doesNotMatch((r as { text?: string }).text ?? "", /repetir_tiradas/);
+  const now = await db.getRollRequests(ch);
+  assert.equal(now.length, 1);
+  assert.equal(now[0].tipo, "Ataque con Espada larga");
+  assert.match(calls.find((c) => c.service === "gemini" && c.body.systemInstruction.parts[0].text.includes("TIRADAS QUE PIDIÓ EL BOT"))!.body.systemInstruction.parts[0].text, /Kael: Atletismo \(1d20\+5, CD 15\)/);
+});
+
+test("si la acción nombra un conjuro, se resuelve como conjuro aunque el árbitro diga otra cosa", async () => {
+  const ch = await newChannel();
+  const stats = statsFromImport({ caracteristicas: { fue: 8, des: 16, con: 14, int: 10, sab: 10, car: 17 }, competencia: 2, ataques: [{ nombre: "Estoque", bono: 5, dano: "1d8+3" }] }).stats;
+  await db.savePlayerSheet(ch, "222", "Lyra", "Semielfo, Bardo 1", KAEL_BARDO_SHEET, "PDF", stats);
+  await db.addPending(ch, "111", "Kael: me cubro");
+  await db.addPending(ch, "222", "Lyra: le lanzo Burla dañina al bandido más cercano");
+  arbiterReply = { en_combate: true, tiradas: [{ personaje: "Lyra", categoria: "ataque", habilidad: "", caracteristica: "", arma: "Estoque", cd: 12, ventaja: "normal", motivo: "", objetivo_indefenso: false, ...noSpell }] };
+  const adv = await advance(env, ch);
+  const r = (adv as { rolls: db.RollRequest[] }).rolls[0];
+  assert.equal(r.tipo, "Conjuro: Burla dañina");
+  assert.equal(r.conjuro?.tipo, "salvacion");
+  assert.equal(r.cd, 13);
+});
+
+test("el daño de los enemigos no se cuenta dos veces si el narrador también lo anota", async () => {
+  const ch = await newChannel();
+  geminiStatus = 200;
+  await db.addPending(ch, "111", "Kael: levanto el escudo");
+  await db.addPending(ch, "222", "Lyra: espero");
+  arbiterReply = { en_combate: true, tiradas: [] };
+  enemyReply = { ataques: [{ atacante: "Bandido", objetivo: "Kael", arma: "cimitarra", bono: 12, dano: "1d2+4", ventaja: "normal" }] };
+  nextNarration = "El bandido lo hiere.\n[cambios]\nKael: HP -6 | +objeto Cimitarra rota\n[/cambios]";
+  const realRandom = Math.random;
+  Math.random = () => 0.5;
+  try {
+    await advance(env, ch);
+  } finally {
+    Math.random = realRandom;
+    enemyReply = { ataques: [] };
+  }
+  const kael = (await db.getPlayer(ch, "111"))!;
+  assert.equal(kael.state.hp_actual, 22, "solo el daño que tiró el bot (28 - 6)");
+  assert.deepEqual(kael.state.inventario, ["Cimitarra rota"], "lo demás que anotó el narrador sí se guarda");
 });

@@ -1,6 +1,6 @@
 import * as db from "./vault";
 import { callAI, modelList, type AIEnv } from "./ai";
-import { arbitrate } from "./arbiter";
+import { arbitrate, enemyTurn } from "./arbiter";
 import { rollDice, type RollResult } from "./dice";
 import { ollamaModel } from "./ollama";
 import { usage, nextReset, parseLimits } from "./quota";
@@ -51,6 +51,24 @@ export async function runTurn(env: GameEnv, ch: string, instruction?: string): P
 
     const lines = pending.map((p) => p.content);
     for (const r of rolls) lines.push(`(${r.character} no llegó a tirar ${r.tipo}.)`);
+
+    // En combate, después de los jugadores atacan los enemigos que siguen en pie: el código tira contra la CA real.
+    const enemyShown: string[] = [];
+    const hurtByEnemies = new Set<string>();
+    if (combat.get(ch) && !instruction) {
+      const lastNarration = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
+      const attacks = await enemyTurn(env, players, lastNarration, lines).catch((e) => {
+        console.warn("Turno enemigo:", (e as Error).message);
+        return [];
+      });
+      if (attacks.length) {
+        lines.push(`[Turno de los enemigos, ya tirado por el bot]\n${attacks.map((a) => a.plain).join("\n")}`);
+        enemyShown.push(...attacks.map((a) => a.display));
+        const hurt = attacks.filter((a) => a.damage > 0).map((a) => ({ character: a.target, ops: [{ kind: "hp" as const, delta: -a.damage }] }));
+        if (hurt.length) await db.applyChanges(ch, hurt);
+        for (const h of hurt) hurtByEnemies.add(h.character);
+      }
+    }
     if (!lines.length && !instruction) lines.push("(Los jugadores no declaran acciones nuevas. Continuá la escena.)");
     if (instruction) lines.push(`[Indicación para el DM: ${instruction}]`);
     const length = LENGTH[turnLength(lines, instruction)];
@@ -65,18 +83,22 @@ export async function runTurn(env: GameEnv, ch: string, instruction?: string): P
     );
 
     // Los bloques [cambios] y [npcs] no se publican: se escriben en las notas de Obsidian.
-    const { text: narration, notes } = await record(ch, raw, players);
+    const { text: narration, notes } = await record(ch, raw, players, hurtByEnemies);
     const maxId = pending.length ? pending[pending.length - 1].id : 0;
     await db.commitTurn(ch, userBlock, narration, maxId);
-    return notes ? `${narration}\n${notes}` : narration;
+    const parts = [enemyShown.length ? enemyShown.join("\n") + "\n" : "", narration, notes ? `\n${notes}` : ""];
+    return parts.join("").trim();
   } finally {
     await db.unlock(ch);
   }
 }
 
 /** Saca los bloques [cambios] y [npcs] de una respuesta, los guarda y devuelve el texto limpio y lo que se anotó. */
-async function record(ch: string, raw: string, players: db.Player[]): Promise<{ text: string; notes: string }> {
+async function record(ch: string, raw: string, players: db.Player[], alreadyHurt = new Set<string>()): Promise<{ text: string; notes: string }> {
   const items = extractChanges(raw, players.map((p) => p.character));
+  // El daño de los ataques enemigos ya lo descontó el bot: si el narrador lo vuelve a anotar, se ignora (no doble daño).
+  for (const c of items.changes) if (alreadyHurt.has(c.character)) c.ops = c.ops.filter((o) => !(o.kind === "hp" && o.delta < 0));
+  items.changes = items.changes.filter((c) => c.ops.length);
   const people = extractNpcs(items.text);
   const applied = items.changes.length ? await db.applyChanges(ch, items.changes) : [];
   const npcResults = people.updates.length ? await db.applyNpcUpdates(ch, people.updates) : [];
@@ -87,7 +109,10 @@ async function record(ch: string, raw: string, players: db.Player[]): Promise<{ 
   return { text: people.text, notes: lines.join("\n") };
 }
 
-export type Advance = { kind: "text"; text: string } | { kind: "rolls"; rolls: db.RollRequest[] };
+export type Advance = { kind: "text"; text: string } | { kind: "rolls"; rolls: db.RollRequest[]; text?: string };
+
+/** Hay combate en el canal (lo decide el árbitro en cada turno). */
+const combat = new Map<string, boolean>();
 
 /** Todos actuaron: el árbitro decide si hacen falta tiradas. Si no, se narra directamente. */
 export async function advance(env: GameEnv, ch: string): Promise<Advance> {
@@ -96,13 +121,14 @@ export async function advance(env: GameEnv, ch: string): Promise<Advance> {
   try {
     const [pending, players, history] = await Promise.all([db.getPending(ch), db.getPlayers(ch), db.getMessages(ch)]);
     const lastNarration = [...history].reverse().find((m) => m.role === "assistant")?.content ?? "";
-    let rolls: Awaited<ReturnType<typeof arbitrate>> = [];
+    let decision: Awaited<ReturnType<typeof arbitrate>> = { rolls: [], combat: false };
     try {
-      rolls = await arbitrate(env, players, lastNarration, pending.map((p) => p.content));
+      decision = await arbitrate(env, players, lastNarration, pending.map((p) => p.content));
     } catch (e) {
       console.warn("El árbitro falló; narro sin pedir tiradas:", (e as Error).message);
     }
-    if (rolls.length) return { kind: "rolls", rolls: await db.setRollRequests(ch, rolls) };
+    combat.set(ch, decision.combat);
+    if (decision.rolls.length) return { kind: "rolls", rolls: await db.setRollRequests(ch, decision.rolls) };
   } finally {
     await db.unlock(ch);
   }
@@ -137,7 +163,8 @@ export async function resolveRoll(ch: string, userId: string, by: { rollId: numb
   const nat20 = roll.note?.startsWith("¡20");
   const nat1 = roll.note?.startsWith("1 natural");
   const success = isAttack && nat20 ? true : isAttack && nat1 ? false : roll.total >= req.cd;
-  const crit = isAttack && nat20;
+  // Contra un objetivo indefenso, todo golpe cuerpo a cuerpo que pega es crítico.
+  const crit = isAttack && (nat20 || (!!req.critico_auto && success));
 
   let damage: RollResult | null = null;
   if (isAttack && success && req.dano) damage = rollDice(crit ? doubleDice(req.dano) : req.dano);
@@ -203,17 +230,51 @@ async function resolveSpell(ch: string, userId: string, req: db.RollRequest, man
   );
 }
 
+/**
+ * /narrar: el DM sigue sin esperar a todos, pero sin saltarse las reglas. Si había tiradas pedidas que nadie hizo,
+ * el bot las tira; si hay acciones que el árbitro todavía no vio, pasan por el árbitro.
+ */
+export async function forceNarrate(env: GameEnv, ch: string): Promise<{ auto: string[]; result: Advance }> {
+  const rolls = await db.getRollRequests(ch);
+  const auto: string[] = [];
+  for (const r of rolls) {
+    const out = await resolveRoll(ch, r.user_id, { rollId: r.id });
+    if (out) auto.push(`${out.display.split("\n")[0]}\n-# 🤖 ${r.character} no tocó su botón: el bot tiró por él`);
+  }
+  if (!rolls.length && (await db.getPending(ch)).length) return { auto, result: await advance(env, ch) };
+  return { auto, result: { kind: "text", text: await runTurn(env, ch) } };
+}
+
 /** Pregunta fuera de personaje: usa el contexto pero no se guarda en la historia. */
-export async function askOoc(env: GameEnv, ch: string, character: string, question: string): Promise<string> {
+export async function askOoc(env: GameEnv, ch: string, character: string, question: string): Promise<Advance> {
   const camp = await db.getCampaign(ch);
-  if (!camp) return "No hay campaña en este canal. Empiecen una con `/campaña`.";
-  const [players, history, npcs] = await Promise.all([db.getPlayers(ch), db.getMessages(ch), db.getNpcs(ch)]);
+  if (!camp) return { kind: "text", text: "No hay campaña en este canal. Empiecen una con `/campaña`." };
+  const [players, history, npcs, pending, requested] = await Promise.all([db.getPlayers(ch), db.getMessages(ch), db.getNpcs(ch), db.getPending(ch), db.getRollRequests(ch)]);
   const recent = history.slice(-4).map((m) => ({ role: m.role, content: m.content }));
   const context = npcContext(npcs, [...recent.map((m) => m.content), question].join("\n"), 15);
-  const raw = await callAI(env, "liviano", oocSystemPrompt(camp, players, context), [...recent, { role: "user", content: `[Fuera de personaje] ${character} pregunta: ${question}` }], 600);
+  const table = [
+    pending.length ? `ACCIONES DECLARADAS QUE EL DM TODAVÍA NO NARRÓ:\n${pending.map((p) => `- ${p.content}`).join("\n")}` : "",
+    requested.length ? `TIRADAS QUE PIDIÓ EL BOT Y TODAVÍA NO SE HICIERON:\n${requested.map((r) => `- ${r.character}: ${r.tipo} (${r.dados}${r.cd ? `, CD ${r.cd}` : ""})`).join("\n")}` : "",
+  ].filter(Boolean).join("\n\n");
+  const raw = await callAI(
+    env,
+    "liviano",
+    oocSystemPrompt(camp, players, [context, table].filter(Boolean).join("\n\n")),
+    [...recent, { role: "user", content: `[Fuera de personaje] ${character} pregunta: ${question}` }],
+    600,
+  );
   // Si el jugador pidió anotar algo que pasó en la partida, se escribe en su hoja (o en la nota del PNJ).
-  const { text, notes } = await record(ch, raw, players);
-  return notes ? `${text}\n${notes}` : text;
+  const redo = /\[repetir_tiradas\]/i.test(raw);
+  const { text, notes } = await record(ch, raw.replace(/\[repetir_tiradas\]/gi, "").trim(), players);
+  const answer = notes ? `${text}\n${notes}` : text;
+  // El jugador tenía razón en que la tirada pedida estaba mal: el árbitro vuelve a decidir.
+  if (redo && requested.length) {
+    await db.clearRollRequests(ch);
+    const again = await advance(env, ch);
+    if (again.kind === "rolls") return { kind: "rolls", rolls: again.rolls, text: answer };
+    return { kind: "text", text: `${answer}\n\n${again.text}` };
+  }
+  return { kind: "text", text: answer };
 }
 
 export interface ImportedSheet {

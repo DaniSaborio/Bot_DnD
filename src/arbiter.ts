@@ -5,8 +5,9 @@
 import { callAI, type AIEnv } from "./ai";
 import { callOllama, ollamaModel } from "./ollama";
 import { recordRequest } from "./quota";
-import { ARBITER_SYSTEM } from "./prompts";
-import { casterNumbers, findSpell, spellDice, type SpellInfo, type SpellKind } from "./spells";
+import { ARBITER_SYSTEM, ENEMY_SYSTEM } from "./prompts";
+import { rollDice } from "./dice";
+import { casterNumbers, findSpell, spellDice, SPELLS, type SpellInfo, type SpellKind } from "./spells";
 import { ABILITIES, SKILLS, SKILL_NAMES, bonusFor, checkLabel, d20, mod, norm, signed, type Ability, type Bonus, type Check } from "./stats";
 import type { Player, RollRequest } from "./vault";
 
@@ -37,19 +38,27 @@ function schemaFor(players: Player[]) {
             salvacion_conjuro: { type: "string", enum: ABILITY_ENUM },
             dados_conjuro: { type: "string" },
             bono_salvacion_objetivo: { type: "integer" },
+            objetivo_indefenso: { type: "boolean" },
           },
-          required: ["personaje", "categoria", "habilidad", "caracteristica", "arma", "cd", "ventaja", "motivo", "conjuro", "nivel_espacio", "tipo_conjuro", "salvacion_conjuro", "dados_conjuro", "bono_salvacion_objetivo"],
+          required: ["personaje", "categoria", "habilidad", "caracteristica", "arma", "cd", "ventaja", "motivo", "conjuro", "nivel_espacio", "tipo_conjuro", "salvacion_conjuro", "dados_conjuro", "bono_salvacion_objetivo", "objetivo_indefenso"],
         },
       },
+      en_combate: { type: "boolean" },
     },
-    required: ["tiradas"],
+    required: ["en_combate", "tiradas"],
   };
 }
 
 const MAX_SCENE_CHARS = 1500;
 
-export async function arbitrate(env: AIEnv, players: Player[], lastNarration: string, actions: string[]): Promise<Omit<RollRequest, "id">[]> {
-  if (!players.length || !actions.length) return [];
+export interface Arbitration {
+  rolls: Omit<RollRequest, "id">[];
+  /** Hay enemigos peleando: después de las tiradas de los jugadores, atacan ellos. */
+  combat: boolean;
+}
+
+export async function arbitrate(env: AIEnv, players: Player[], lastNarration: string, actions: string[]): Promise<Arbitration> {
+  if (!players.length || !actions.length) return { rolls: [], combat: false };
   const sheets = players.map(brief).join("\n");
   const scene = lastNarration.length > MAX_SCENE_CHARS ? "…" + lastNarration.slice(-MAX_SCENE_CHARS) : lastNarration;
   const prompt = `PERSONAJES:\n${sheets}\n\nESCENA ACTUAL:\n${scene || "(Comienzo de la escena.)"}\n\nACCIONES DECLARADAS:\n${actions.join("\n")}`;
@@ -61,10 +70,13 @@ export async function arbitrate(env: AIEnv, players: Player[], lastNarration: st
     raw = await callOllama(env, ARBITER_SYSTEM, messages, 400, { schema: schemaFor(players), temperature: 0.2, timeoutMs: 45_000 });
   } catch (e) {
     console.warn(`Árbitro local: ${(e as Error).message} → uso Gemini`);
-    const schemaHint = `\n\nFormato: {"tiradas": [{"personaje": "", "categoria": "habilidad", "habilidad": "Atletismo", "caracteristica": "", "arma": "", "cd": 15, "ventaja": "normal", "motivo": ""}]}`;
+    const schemaHint = `\n\nFormato: {"en_combate": false, "tiradas": [{"personaje": "", "categoria": "habilidad", "habilidad": "Atletismo", "caracteristica": "", "arma": "", "cd": 15, "ventaja": "normal", "motivo": "", "conjuro": "", "nivel_espacio": 0, "tipo_conjuro": "", "salvacion_conjuro": "", "dados_conjuro": "", "bono_salvacion_objetivo": 0, "objetivo_indefenso": false}]}`;
     raw = await callAI(env, "liviano", ARBITER_SYSTEM + schemaHint, messages, 400, { json: true });
   }
-  return validate(raw, players);
+  const result = validate(raw, players, actions);
+  ensureRolls(result.rolls, players, actions, scene);
+  if (result.rolls.some((r) => /^(Ataque|Conjuro)/.test(r.tipo))) result.combat = true;
+  return result;
 }
 
 /**
@@ -176,13 +188,15 @@ function spellRequest(player: Player, t: Record<string, any>): Omit<RollRequest,
   return { ...base, dados: dice || "0", cd: 0, dano: "", conjuro: { tipo, nivel: slot, curacion: !!info.curacion, efecto: info.efecto } };
 }
 
-function validate(raw: string, players: Player[]): Omit<RollRequest, "id">[] {
-  let data: { tiradas?: unknown };
+const alreadyRolled = (p: Player, actions: string[]) => actions.some((a) => a.startsWith(`${p.character} tira `) || a.startsWith(`${p.character} lanza `));
+
+function validate(raw: string, players: Player[], actions: string[] = []): Arbitration {
+  let data: { tiradas?: unknown; en_combate?: unknown };
   try {
     data = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
   } catch {
     console.warn("El árbitro devolvió algo que no es JSON:", raw.slice(0, 200));
-    return [];
+    return { rolls: [], combat: false };
   }
   const out: Omit<RollRequest, "id">[] = [];
   for (const t of Array.isArray(data.tiradas) ? data.tiradas : []) {
@@ -190,6 +204,15 @@ function validate(raw: string, players: Player[]): Omit<RollRequest, "id">[] {
     const name = norm(String(t.personaje ?? ""));
     const player = players.find((p) => norm(p.character) === name) ?? players.find((p) => name && (norm(p.character).startsWith(name) || name.startsWith(norm(p.character))));
     if (!player || out.some((r) => r.user_id === player.user_id)) continue;
+    if (alreadyRolled(player, actions)) continue;
+    // Si la acción nombra un conjuro conocido ("le lanzo Burla dañina"), se resuelve como ese conjuro aunque el
+    // modelo lo haya clasificado como otra cosa (pasó: pidió "Ataque con Estoque" para Burla dañina).
+    const named = mentionedSpell(player, actions);
+    if (named && (t.categoria !== "conjuro" || !findSpell(String(t.conjuro ?? "")))) {
+      const r = spellRequest(player, { ...t, conjuro: named.nombre, nivel_espacio: Number(t.nivel_espacio) || named.nivel });
+      if (r) out.push(r);
+      continue;
+    }
     if (t.categoria === "conjuro") {
       const spell = spellRequest(player, t);
       if (spell) out.push(spell);
@@ -199,7 +222,10 @@ function validate(raw: string, players: Player[]): Omit<RollRequest, "id">[] {
     if (!check) continue;
 
     const bonus = bonusForPlayer(player, check);
-    const ventaja = t.ventaja === "ventaja" || t.ventaja === "desventaja" ? t.ventaja : "normal";
+    // Contra un objetivo dormido, inconsciente o paralizado: ventaja, y si pega cuerpo a cuerpo es crítico.
+    const helpless = check.categoria === "ataque" && t.objetivo_indefenso === true;
+    const ventaja = helpless ? "ventaja" : t.ventaja === "ventaja" || t.ventaja === "desventaja" ? t.ventaja : "normal";
+    const meleeCrit = helpless && !RANGED.test(norm(bonus.arma ?? check.arma));
     out.push({
       user_id: player.user_id,
       character: player.character,
@@ -208,10 +234,63 @@ function validate(raw: string, players: Player[]): Omit<RollRequest, "id">[] {
       cd: Math.min(30, Math.max(5, Math.round(Number(t.cd) || 15))),
       dano: check.categoria === "ataque" ? (bonus.dano ?? "") : "",
       motivo: String(t.motivo ?? "").trim().slice(0, 120),
-      fuente: `${bonus.source}${ventaja !== "normal" ? ` · con ${ventaja}` : ""}`,
+      fuente: `${bonus.source}${ventaja !== "normal" ? ` · con ${ventaja}` : ""}${meleeCrit ? " · objetivo indefenso: si pega, es crítico" : ""}`,
+      ...(meleeCrit ? { critico_auto: true } : {}),
     });
   }
-  return out;
+  return { rolls: out, combat: data.en_combate === true };
+}
+
+const RANGED = /arco|ballesta|honda|dardo|jabalina|cerbatana|red\b|bow|crossbow|sling/;
+const ATTACK_VERB = /\b(ataco|ataca|atacamos|golpeo|golpea|apunalo|apunala|acuchillo|corto|clavo|hiero|disparo|dispara|tiro una flecha|lanzo (?:mi|una|un) (?:daga|hacha|lanza|jabalina)|le doy (?:un|con)|ensarto|decapito|remato)\b/;
+const HELPLESS = /dormid|inconscient|paralizad|indefens|atad[oa]s?\b|desmayad/;
+
+/** Conjuro conocido que el jugador dice lanzar en su acción ("lanzo Dormir", "uso el conjuro sueño"). */
+function mentionedSpell(player: Player, actions: string[]): SpellInfo | undefined {
+  const text = actions
+    .filter((a) => a.startsWith(`${player.character}:`))
+    .map((a) => norm(a.slice(player.character.length + 1)))
+    .join(" ");
+  if (!/\b(lanzo|lanza|uso|usa|conjuro|invoco|canto|toco|hago|le tiro|le echo)\b/.test(text)) return undefined;
+  return SPELLS.find((sp) => [sp.nombre, ...sp.alias].some((a) => new RegExp(`\\b${norm(a).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text)));
+}
+
+/**
+ * Red de seguridad: todo ataque y todo conjuro con tirada se tiran, aunque el modelo chico no los haya pedido
+ * (por ejemplo, rematar a una criatura dormida igual lleva tirada de ataque, con ventaja).
+ */
+function ensureRolls(out: Omit<RollRequest, "id">[], players: Player[], actions: string[], scene: string) {
+  const ac = Number(/\bCA\s*(\d{1,2})\b/.exec(scene)?.[1]) || 12;
+  for (const player of players) {
+    if (out.some((r) => r.user_id === player.user_id)) continue;
+    // Ya tiró este turno ("Kael tira …" / "Kael lanza …"): no se le pide otra.
+    if (actions.some((a) => a.startsWith(`${player.character} tira `) || a.startsWith(`${player.character} lanza `))) continue;
+    const mine = actions.filter((a) => a.startsWith(`${player.character}:`)).map((a) => norm(a.slice(player.character.length + 1)));
+    const text = mine.join(" ");
+    if (!text) continue;
+    const helpless = HELPLESS.test(norm(scene)) || HELPLESS.test(text);
+
+    const spell = mentionedSpell(player, actions);
+    if (spell) {
+      const r = spellRequest(player, { conjuro: spell.nombre, nivel_espacio: spell.nivel, cd: ac, bono_salvacion_objetivo: 1, ventaja: helpless && spell.tipo === "ataque" ? "ventaja" : "normal", motivo: "" });
+      if (r) out.push({ ...r, fuente: `${r.fuente} · ⚠️ el árbitro no la pidió: el bot la agregó` });
+      continue;
+    }
+    if (!ATTACK_VERB.test(text) || !player.stats?.ataques.length) continue;
+    const atk = player.stats.ataques.find((a) => text.includes(norm(a.nombre).split(" ")[0])) ?? player.stats.ataques[0];
+    const melee = !RANGED.test(norm(atk.nombre));
+    out.push({
+      user_id: player.user_id,
+      character: player.character,
+      tipo: `Ataque con ${atk.nombre}`,
+      dados: d20(atk.bono, helpless ? "ventaja" : "normal"),
+      cd: ac,
+      dano: atk.dano,
+      motivo: "",
+      fuente: `${atk.nombre} ${signed(atk.bono)} según tu ficha · ⚠️ el árbitro no la pidió: todo ataque lleva tirada (CA estimada ${ac})${helpless ? " · objetivo indefenso: con ventaja" + (melee ? ", y si pega es crítico" : "") : ""}`,
+      ...(helpless && melee ? { critico_auto: true } : {}),
+    });
+  }
 }
 
 // ---------- bonificadores desde la ficha ----------
@@ -277,4 +356,98 @@ export function withBonus(dados: string, bonus: number): string {
   const m = /^(\d*d20(?:k[hl]1)?)([+-]\d+)?$/i.exec(dados);
   if (!m) return dados;
   return bonus === 0 ? m[1] : `${m[1]}${bonus > 0 ? "+" : ""}${bonus}`;
+}
+
+// ---------- turno de los enemigos ----------
+
+export interface EnemyAttack {
+  /** Para el narrador. */
+  plain: string;
+  /** Para Discord. */
+  display: string;
+  target: string;
+  damage: number;
+}
+
+const enemySchema = (players: Player[]) => ({
+  type: "object",
+  properties: {
+    ataques: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          atacante: { type: "string" },
+          objetivo: { type: "string", enum: players.map((p) => p.character) },
+          arma: { type: "string" },
+          bono: { type: "integer" },
+          dano: { type: "string" },
+          ventaja: { type: "string", enum: ["normal", "ventaja", "desventaja"] },
+        },
+        required: ["atacante", "objetivo", "arma", "bono", "dano", "ventaja"],
+      },
+    },
+  },
+  required: ["ataques"],
+});
+
+/** CA del personaje: la de las estadísticas o la escrita en la ficha. */
+function armorClass(p: Player): number | null {
+  return p.stats?.ca ?? (Number(/\bCA\s*:?\s*(\d{1,2})\b/.exec(p.sheet)?.[1]) || null);
+}
+
+/**
+ * En combate, después de que los jugadores actúan: qué enemigos que siguen en pie atacan a quién. El modelo local solo
+ * decide eso y estima el bonificador y el daño de cada enemigo (los números de los monstruos son cosa del DM); las
+ * tiradas las hace el código contra la CA real de cada personaje.
+ */
+export async function enemyTurn(env: AIEnv, players: Player[], scene: string, turn: string[]): Promise<EnemyAttack[]> {
+  if (!players.length) return [];
+  const sheets = players.map((p) => `- ${p.character}${p.description ? ` — ${p.description}` : ""}${armorClass(p) ? ` (CA ${armorClass(p)})` : ""}`).join("\n");
+  const prompt = `PERSONAJES JUGADORES:\n${sheets}\n\nESCENA ANTERIOR:\n${scene.slice(-MAX_SCENE_CHARS) || "(combate)"}\n\nLO QUE HICIERON LOS JUGADORES ESTE TURNO (ya resuelto):\n${turn.join("\n") || "(nada)"}`;
+  let raw: string;
+  try {
+    recordRequest(`ollama:${ollamaModel(env)}`);
+    raw = await callOllama(env, ENEMY_SYSTEM, [{ role: "user", content: prompt }], 400, { schema: enemySchema(players), temperature: 0.2, timeoutMs: 45_000 });
+  } catch (e) {
+    console.warn(`Turno enemigo local: ${(e as Error).message} → uso Gemini`);
+    raw = await callAI(env, "liviano", ENEMY_SYSTEM + `\n\nFormato: {"ataques": [{"atacante": "", "objetivo": "", "arma": "", "bono": 3, "dano": "1d6+1", "ventaja": "normal"}]}`, [{ role: "user", content: prompt }], 400, { json: true });
+  }
+  let data: { ataques?: unknown };
+  try {
+    data = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+  } catch {
+    return [];
+  }
+  const out: EnemyAttack[] = [];
+  for (const a of (Array.isArray(data.ataques) ? data.ataques : []).slice(0, 8)) {
+    const target = players.find((p) => norm(p.character) === norm(String(a?.objetivo ?? "")));
+    const ac = target && armorClass(target);
+    if (!target || !ac) continue;
+    const who = String(a.atacante ?? "Un enemigo").trim().slice(0, 40) || "Un enemigo";
+    const weapon = String(a.arma ?? "").trim().slice(0, 30);
+    const bono = Math.max(0, Math.min(12, Math.round(Number(a.bono) || 3)));
+    const ventaja = a.ventaja === "ventaja" || a.ventaja === "desventaja" ? a.ventaja : "normal";
+    const expr = d20(bono, ventaja);
+    const roll = rollDice(expr);
+    const nat20 = roll.note?.startsWith("¡20");
+    const nat1 = roll.note?.startsWith("1 natural");
+    const hit = nat20 || (!nat1 && roll.total >= ac);
+    let dano = String(a.dano ?? "").replace(/\s+/g, "");
+    try {
+      rollDice(dano);
+    } catch {
+      dano = "1d6";
+    }
+    const damage = hit ? rollDice(nat20 ? dano.replace(/(\d*)d(\d+)/gi, (_, n, sd) => `${(Number(n) || 1) * 2}d${sd}`) : dano) : null;
+    const dmg = Math.max(0, damage?.total ?? 0);
+    const verdict = hit ? `impacta${nat20 ? " (¡crítico!)" : ""}, ${dmg} de daño` : "falla";
+    out.push({
+      target: target.character,
+      damage: dmg,
+      plain: `${who} ataca a ${target.character}${weapon ? ` con ${weapon}` : ""} ${expr}: ${roll.detail.replace(/~~/g, "")} = ${roll.total} vs CA ${ac} → ${verdict}`,
+      display: `⚔️ **${who}** ataca a **${target.character}**${weapon ? ` con ${weapon}` : ""}: \`${expr}\` ${roll.detail} = **${roll.total}** vs CA ${ac} → ${hit ? `💥 **${dmg}** de daño${nat20 ? " **¡CRÍTICO!**" : ""}` : "🛡️ falla"}`,
+    });
+  }
+  return out;
 }

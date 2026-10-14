@@ -24,7 +24,14 @@ Bot de Discord que hace de Dungeon Master, **100% gratis**: **Google Gemini** na
 3. Cada uno toca su botón: el bot tira, compara con la CD y, si es un ataque que pega, tira también el daño (doble en un 20 natural).
 4. Con todos los resultados, el DM narra **una sola vez** lo que pasó.
 
-Si el árbitro no pide tiradas, el DM narra directamente. Si alguien no tiene nada que hacer, o no quieren esperar una tirada, usen `/narrar`.
+Si el árbitro no pide tiradas, el DM narra directamente. Si alguien no tiene nada que hacer, o no quieren esperar una tirada, usen `/narrar`: **no se saltea las reglas**. Si hay tiradas que nadie hizo, el bot las tira por esos jugadores, y si hay acciones que el árbitro todavía no vio, pasan primero por él.
+
+Si declarás otra acción mientras se esperaba tu tirada (por ejemplo, para corregirla), la nueva **reemplaza** a la anterior y el árbitro vuelve a decidir. Si creés que una tirada pedida está mal, decilo con `/ooc`: si tenés razón, el árbitro la vuelve a decidir.
+
+**Combate:**
+- **Todo ataque lleva tirada**, aunque el objetivo esté dormido o atado. Si el árbitro no la pide, el bot la agrega igual.
+- Contra un objetivo **dormido, inconsciente o paralizado** se ataca **con ventaja**, y un golpe cuerpo a cuerpo que pega es **crítico** (dados de daño dobles).
+- **Turno de los enemigos:** después de que actúan los jugadores, el árbitro decide qué enemigos que siguen en pie atacan a quién (los dormidos o muertos no atacan) y **el bot tira** contra tu **CA real** y descuenta los HP de tu hoja. Se ve así: `⚔️ Bandido ataca a Kael con Cimitarra: 1d20+3 = 15 vs CA 14 → 💥 4 de daño`. El DM narra respetando esos resultados.
 
 **Conjuros:** cada conjuro se resuelve como en el Manual del Jugador, no siempre con 1d20:
 - **De ataque** (*Rayo de fuego*, *Saeta guía*): 1d20 + tu ataque de conjuros contra la CA del objetivo, y el daño si pega.
