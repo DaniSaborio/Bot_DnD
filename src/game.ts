@@ -147,7 +147,11 @@ export async function askOoc(env: GameEnv, ch: string, character: string, questi
   if (!camp) return "No hay campaña en este canal. Empiecen una con `/campaña`.";
   const [players, history] = await Promise.all([db.getPlayers(ch), db.getMessages(ch)]);
   const recent = history.slice(-4).map((m) => ({ role: m.role, content: m.content }));
-  return callAI(env, "liviano", oocSystemPrompt(camp, players), [...recent, { role: "user", content: `[Fuera de personaje] ${character} pregunta: ${question}` }], 600);
+  const raw = await callAI(env, "liviano", oocSystemPrompt(camp, players), [...recent, { role: "user", content: `[Fuera de personaje] ${character} pregunta: ${question}` }], 600);
+  // Si el jugador pidió anotar algo que pasó en la partida, se escribe en su hoja.
+  const { text, changes } = extractChanges(raw, players.map((p) => p.character));
+  const applied = changes.length ? await db.applyChanges(ch, changes) : [];
+  return applied.length ? `${text}\n-# 📝 Anotado en la hoja: ${describeChanges(applied)}` : text;
 }
 
 export interface ImportedSheet {

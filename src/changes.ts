@@ -87,8 +87,7 @@ export function applyOps(state: CampaignState, ops: Op[], hpMax?: number): Campa
       } else if (i >= 0) s.inventario.splice(i, 1);
       else if (!s.perdidos.some((x) => norm(x) === norm(op.name))) s.perdidos.push(op.name);
     } else if (op.kind === "money") {
-      // No se puede gastar lo que no se tiene: el total nunca baja de 0.
-      s.dinero[op.coin] = Math.max(0, (s.dinero[op.coin] ?? 0) + op.amount);
+      s.dinero = op.amount >= 0 ? { ...s.dinero, [op.coin]: (s.dinero[op.coin] ?? 0) + op.amount } : pay(s.dinero, op.coin, -op.amount);
     } else if (op.kind === "hp") {
       const current = s.hp_actual ?? hpMax;
       if (current == null) continue; // sin HP conocidos no se inventa un número
@@ -102,6 +101,46 @@ export function applyOps(state: CampaignState, ops: Op[], hpMax?: number): Campa
     }
   }
   return s;
+}
+
+// Valor de cada moneda en piezas de cobre.
+const VALUE: Record<Coin, number> = { pc: 1, pp: 10, pe: 50, po: 100, ppt: 1000 };
+const BY_VALUE: Coin[] = ["pc", "pp", "pe", "po", "ppt"];
+
+/**
+ * Paga una cantidad de una moneda. Si no alcanza, cambia una moneda más grande (como en la mesa: pagás con oro y te
+ * dan el vuelto en esa moneda). Si no alcanza ni con todo, queda en 0: no se puede gastar lo que no se tiene.
+ */
+export function pay(purse: Partial<Record<Coin, number>>, coin: Coin, amount: number): Partial<Record<Coin, number>> {
+  const p: Partial<Record<Coin, number>> = { ...purse };
+  const total = BY_VALUE.reduce((sum, c) => sum + (p[c] ?? 0) * VALUE[c], 0);
+  if (total < amount * VALUE[coin]) {
+    for (const c of BY_VALUE) if (p[c] != null) p[c] = 0;
+    p[coin] = 0;
+    return p;
+  }
+  let need = amount;
+  while ((p[coin] ?? 0) < need) {
+    // La moneda más chica que sea más grande que esta y que tengamos
+    const bigger = BY_VALUE.find((c) => VALUE[c] > VALUE[coin] && (p[c] ?? 0) > 0);
+    if (!bigger) {
+      // Solo quedan monedas más chicas: se pagan con ellas
+      const rest = need * VALUE[coin] - (p[coin] ?? 0) * VALUE[coin];
+      p[coin] = 0;
+      need = 0;
+      let left = rest;
+      for (const c of [...BY_VALUE].reverse().filter((c) => VALUE[c] < VALUE[coin])) {
+        const use = Math.min(p[c] ?? 0, Math.floor(left / VALUE[c]));
+        if (use) p[c] = (p[c] ?? 0) - use;
+        left -= use * VALUE[c];
+      }
+      break;
+    }
+    p[bigger] = (p[bigger] ?? 0) - 1;
+    p[coin] = (p[coin] ?? 0) + VALUE[bigger] / VALUE[coin];
+  }
+  if (need) p[coin] = (p[coin] ?? 0) - need;
+  return p;
 }
 
 const signedAmount = (n: number) => (n > 0 ? `+${n}` : `${n}`);

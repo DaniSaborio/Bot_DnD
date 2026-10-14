@@ -490,3 +490,23 @@ test("lo que consigue el personaje se escribe en su nota de Obsidian, no solo en
   await db.savePlayerSheet(ch, "111", "Kael", "humano guerrero 4", KAEL, "PDF: kael.pdf", KAEL_STATS);
   assert.deepEqual((await db.getPlayer(ch, "111"))!.state.inventario, ["Amuleto de plata"]);
 });
+
+test("pagar con monedas que no alcanzan: se cambia una más grande, como en la mesa", async () => {
+  const { pay } = await import("../src/changes");
+  assert.deepEqual(pay({ po: 20 }, "pc", 3), { po: 19, pc: 97 }, "3 pc pagando con 1 po");
+  assert.deepEqual(pay({ po: 1, pc: 5 }, "pc", 3), { po: 1, pc: 2 });
+  assert.deepEqual(pay({ po: 2, pp: 5 }, "pp", 7), { po: 1, pp: 8 });
+  assert.deepEqual(pay({ pp: 30 }, "po", 2), { pp: 10, po: 0 }, "2 po pagados con 20 pp");
+  assert.deepEqual(pay({ po: 1 }, "po", 5), { po: 0 }, "no alcanza: queda en 0");
+});
+
+test("/ooc puede anotar en la hoja lo que el jugador pide y pasó en la partida", async () => {
+  const { askOoc } = await import("../src/game");
+  const ch = await newChannel();
+  geminiStatus = 200;
+  nextNarration = "Listo, anoté la poción.\n[cambios]\nKael: +objeto Poción de curación\n[/cambios]";
+  const answer = await askOoc(env, ch, "Kael", "anotaste la poción que compré?");
+  assert.match(answer, /^Listo, anoté la poción\.\n-# 📝 Anotado en la hoja: Kael: \+Poción de curación$/);
+  assert.deepEqual((await db.getPlayer(ch, "111"))!.state.inventario, ["Poción de curación"]);
+  assert.match(calls.at(-1)!.body.systemInstruction.parts[0].text, /ESTADO ACTUAL DE CADA PERSONAJE/);
+});

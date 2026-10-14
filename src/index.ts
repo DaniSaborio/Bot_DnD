@@ -9,6 +9,8 @@ import {
   type ButtonInteraction,
   type ChatInputCommandInteraction,
 } from "discord.js";
+import { promises as fs, readFileSync, unlinkSync } from "node:fs";
+import path from "node:path";
 import { splitMessage } from "./discord";
 import * as db from "./vault";
 import { rollDice } from "./dice";
@@ -311,6 +313,40 @@ async function handleCommand(i: ChatInputCommandInteraction) {
   }
 }
 
+/**
+ * Dos copias del bot a la vez reciben los mismos comandos y escriben en la misma bóveda: la que responde primero gana
+ * y la otra puede duplicar acciones. Por eso el bot deja su número de proceso en la bóveda y no arranca si ya hay otro.
+ */
+async function singleInstance(folder: string) {
+  const lock = path.join(folder, ".bot.pid");
+  const other = Number(await fs.readFile(lock, "utf8").catch(() => ""));
+  if (other && other !== process.pid) {
+    let alive = false;
+    try {
+      process.kill(other, 0);
+      alive = true;
+    } catch {
+      // el proceso ya no existe: el archivo quedó de una vez que el bot se cerró mal
+    }
+    if (alive) throw new Error(`Ya hay otra copia del bot corriendo (proceso ${other}). Cerrala primero (Ctrl+C en su terminal, o: kill ${other}).`);
+  }
+  await fs.writeFile(lock, String(process.pid));
+  const release = () => {
+    try {
+      if (readFileSync(lock, "utf8") === String(process.pid)) unlinkSync(lock);
+    } catch {
+      // ya no estaba
+    }
+  };
+  process.on("exit", release);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => {
+      console.log("👋 DM bot cerrado");
+      process.exit(0);
+    });
+  }
+}
+
 async function main() {
   const { DISCORD_TOKEN, OBSIDIAN_VAULT, OBSIDIAN_FOLDER } = process.env;
   if (!DISCORD_TOKEN) throw new Error("Falta DISCORD_TOKEN en .env");
@@ -318,6 +354,7 @@ async function main() {
   if (!env.GEMINI_API_KEY) throw new Error("Falta GEMINI_API_KEY en .env");
 
   const folder = await db.initVault(OBSIDIAN_VAULT, OBSIDIAN_FOLDER || "DnD");
+  await singleInstance(folder);
   await initQuota(folder);
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
