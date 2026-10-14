@@ -9,6 +9,7 @@ import { runTurn, advance, resolveRoll, maybeCompact, quotaReport, turnLength } 
 import { callAI } from "../src/ai";
 import { sheetBonus, withBonus, brief } from "../src/arbiter";
 import { statsFromImport, statsFromProps, statsToProps, bonusFor } from "../src/stats";
+import { extractChanges, applyOps, emptyState } from "../src/changes";
 import { initQuota } from "../src/quota";
 
 const KAEL = `HP máx 28 · CA 18 · Velocidad 30
@@ -22,6 +23,8 @@ const calls: { service: "gemini" | "ollama"; model: string; body: any }[] = [];
 let geminiStatus = 200;
 let arbiterReply: object = { tiradas: [] };
 let narration = 0;
+/** Si se define, el próximo pedido de narración a Gemini devuelve este texto. */
+let nextNarration: string | null = null;
 
 globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
   const url = String(input);
@@ -30,7 +33,11 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const model = url.split("/models/")[1].split(":")[0];
     calls.push({ service: "gemini", model, body });
     if (geminiStatus !== 200) return new Response("{}", { status: geminiStatus });
-    const text = body.generationConfig.responseMimeType ? JSON.stringify(arbiterReply) : `Narración ${++narration}`;
+    let text = body.generationConfig.responseMimeType ? JSON.stringify(arbiterReply) : `Narración ${++narration}`;
+    if (!body.generationConfig.responseMimeType && nextNarration != null) {
+      text = nextNarration;
+      nextNarration = null;
+    }
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }));
   }
   calls.push({ service: "ollama", model: body.model, body });
@@ -413,4 +420,73 @@ test("el largo de la narración depende de lo que pasó en el turno", async () =
   assert.equal(call.body.generationConfig.maxOutputTokens, 900, "300 tokens de narración + margen para razonar");
   const saved = await db.getMessages(ch);
   assert.doesNotMatch(saved.at(-2)!.content, /Extensión/, "la indicación no se guarda en el historial");
+});
+
+// ---------- objetos, dinero y HP en la hoja del personaje ----------
+
+test("el bloque [cambios] se entiende aunque venga escrito de distintas formas", () => {
+  const raw = `Abren el cofre: adentro brilla un amuleto.
+
+[cambios]
+- **Kael**: +objeto "Amuleto de plata" | HP -9 | +condición Envenenado
+lyra: +25 po; -objeto Antorcha | +objeto
+Nadie: +objeto Espada
+[/cambios]`;
+  const { text, changes } = extractChanges(raw, ["Kael", "Lyra"]);
+  assert.equal(text, "Abren el cofre: adentro brilla un amuleto.");
+  assert.deepEqual(changes, [
+    { character: "Kael", ops: [{ kind: "item", add: true, name: "Amuleto de plata" }, { kind: "hp", delta: -9 }, { kind: "condition", add: true, name: "envenenado" }] },
+    { character: "Lyra", ops: [{ kind: "money", coin: "po", amount: 25 }, { kind: "item", add: false, name: "Antorcha" }] },
+  ]);
+  assert.equal(extractChanges("Sin cambios.", ["Kael"]).changes.length, 0);
+});
+
+test("los cambios se aplican con sentido: HP entre 0 y el máximo, el dinero no baja de 0", () => {
+  let st = applyOps(emptyState(), [{ kind: "hp", delta: -9 }], 28);
+  assert.equal(st.hp_actual, 19);
+  st = applyOps(st, [{ kind: "hp", delta: 50 }], 28);
+  assert.equal(st.hp_actual, 28, "la curación no pasa del máximo");
+  st = applyOps(st, [{ kind: "hp", delta: -40 }], 28);
+  assert.equal(st.hp_actual, 0);
+  st = applyOps(st, [{ kind: "money", coin: "po", amount: -5 }]);
+  assert.equal(st.dinero.po, 0);
+  st = applyOps(st, [{ kind: "item", add: true, name: "Cuerda" }, { kind: "item", add: false, name: "cuerda" }]);
+  assert.deepEqual(st.inventario, []);
+  st = applyOps(st, [{ kind: "item", add: false, name: "Escudo" }]);
+  assert.deepEqual(st.perdidos, ["Escudo"], "perder algo de la ficha original queda anotado");
+  st = applyOps(st, [{ kind: "item", add: true, name: "escudo" }]);
+  assert.deepEqual(st.perdidos, [], "y si lo recupera, se borra de perdidos");
+});
+
+test("lo que consigue el personaje se escribe en su nota de Obsidian, no solo en el historial", async () => {
+  const ch = await newChannel();
+  await db.savePlayerSheet(ch, "222", "Lyra", "elfa pícara", "Equipo: dagas, herramientas de ladrón, 40 po", "PDF: lyra.pdf");
+  geminiStatus = 200;
+  await db.addPending(ch, "111", "Kael: abro el cofre");
+  nextNarration = "Kael abre el cofre y encuentra un amuleto de plata. Una aguja oculta lo pincha.\n\n[cambios]\nKael: +objeto Amuleto de plata | HP -3\nLyra: +po 10\n[/cambios]";
+  const shown = await runTurn(env, ch);
+
+  assert.doesNotMatch(shown, /\[cambios\]/, "el bloque no se publica");
+  assert.match(shown, /📝 Anotado en la hoja: Kael: \+Amuleto de plata, HP -3 · Lyra: \+10 po/);
+  assert.doesNotMatch((await db.getMessages(ch)).at(-1)!.content, /cambios/, "ni queda en el historial");
+
+  const kael = (await db.getPlayer(ch, "111"))!;
+  assert.deepEqual(kael.state.inventario, ["Amuleto de plata"]);
+  assert.equal(kael.state.hp_actual, 25);
+  assert.equal((await db.getPlayer(ch, "222"))!.state.dinero.po, 50, "el dinero arranca desde lo que dice la ficha (40 + 10)");
+
+  const dir = (await fs.readdir(root)).find((d) => d.endsWith(`(${ch})`))!;
+  const note = await fs.readFile(path.join(root, dir, "Personajes", "Kael.md"), "utf8");
+  assert.match(note, /inventario:\n {2}- Amuleto de plata/, "propiedad editable");
+  assert.match(note, /## En la campaña[\s\S]*Amuleto de plata[\s\S]*## Ficha/, "y sección legible");
+  assert.equal((await db.getPlayer(ch, "111"))!.sheet, KAEL, "la ficha en texto no se toca");
+
+  // El narrador ve el estado en el turno siguiente
+  await db.addPending(ch, "111", "Kael: sigo");
+  await runTurn(env, ch);
+  assert.match(calls.at(-1)!.body.systemInstruction.parts[0].text, /Kael: humano guerrero 3 \(CA 18 · HP 25\/28 · lleva además: Amuleto de plata\)/);
+
+  // Volver a importar la ficha (por ejemplo al subir de nivel) conserva lo conseguido
+  await db.savePlayerSheet(ch, "111", "Kael", "humano guerrero 4", KAEL, "PDF: kael.pdf", KAEL_STATS);
+  assert.deepEqual((await db.getPlayer(ch, "111"))!.state.inventario, ["Amuleto de plata"]);
 });

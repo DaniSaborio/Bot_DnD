@@ -72,6 +72,8 @@ export function brief(p: Player): string {
   if (s.ataques.length) lines.push(`  Armas: ${s.ataques.map((a) => a.nombre).join(", ")}`);
   const proficient = Object.keys(s.habilidades).filter((k) => s.habilidades[k] > mod(s.scores[SKILLS[k]]));
   if (proficient.length) lines.push(`  Competente en: ${proficient.join(", ")}`);
+  if (p.state.inventario.length) lines.push(`  Consiguió en la campaña: ${p.state.inventario.join(", ")}`);
+  if (p.state.condiciones.length) lines.push(`  Condiciones: ${p.state.condiciones.join(", ")}`);
   // Rasgos, conjuros y equipo ayudan a decidir (ej. herramientas de ladrón); las líneas de números no hacen falta.
   const extras = p.sheet
     .split("\n")

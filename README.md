@@ -77,6 +77,7 @@ DnD/
 **Podés editar en Obsidian** y el bot usa los cambios en el siguiente turno, sin reiniciarlo:
 - **Números de la ficha** (`Personajes/*.md`, en las propiedades de arriba): `fue`, `des`… (puntuaciones), `competencia`, `ca`, `hp_max`, y las listas `salvaciones`, `habilidades` y `ataques` (ej. `Sigilo +7`, `Daga +5 · 1d4+3`). Son los que usa el bot para cada tirada: si algo está mal, corregilo ahí.
 - **Ficha en texto** (`Personajes/*.md`, debajo de `## Ficha`): rasgos, conjuros, equipo. Agregá un objeto mágico o lo que quieras.
+- **Lo que pasa en la campaña** (`Personajes/*.md`, propiedades `inventario`, `hp_actual`, `po`/`pp`/`pc`…, `condiciones`, `objetos_perdidos`): se actualiza **solo** durante la partida. Cuando tu personaje agarra, compra o recibe un objeto, gasta o gana dinero, recibe daño o curación, o queda envenenado, el DM lo anota y el bot lo escribe en tu nota (también se ve en la sección `## En la campaña`). En Discord aparece una línea `📝 Anotado en la hoja: …` para que sepas qué se guardó. Si algo quedó mal, corregí la propiedad a mano. Volver a hacer `/importar` (por ejemplo al subir de nivel) conserva todo esto.
 - **Resumen** (`Campaña.md`): lo que esté debajo de `## Resumen` es la memoria del DM. Podés agregar notas propias (NPCs, secretos, ganchos de trama).
 - **Historial**: se puede leer y releer como el diario de la partida. Si lo editás, no borres las marcas `<!-- msg N ... -->` (en modo lectura no se ven); son las que usa el bot para separar los turnos.
 

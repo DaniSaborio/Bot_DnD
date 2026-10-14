@@ -11,7 +11,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import { statsFromProps, statsToProps, type Stats } from "./stats";
+import { statsFromProps, statsToProps, norm, type Stats } from "./stats";
+import { applyOps, emptyState, moneyFromSheet, stateFromProps, stateToProps, COINS, type CampaignState, type Change } from "./changes";
 
 export interface Campaign {
   channel_id: string;
@@ -27,6 +28,8 @@ export interface Player {
   sheet_url: string;
   /** Números exactos de la ficha (propiedades de la nota). null si no hay ficha importada o le faltan datos. */
   stats: Stats | null;
+  /** Lo que cambió en la campaña: objetos, dinero, HP actuales, condiciones. */
+  state: CampaignState;
 }
 export interface Message {
   id: number;
@@ -58,6 +61,7 @@ const PLAYERS_DIR = "Personajes";
 const ARCHIVE_DIR = "Archivo";
 const SUMMARY_HEADING = "## Resumen";
 const SHEET_HEADING = "## Ficha";
+const CAMPAIGN_HEADING = "## En la campaña";
 
 const MSG_MARK = /^<!-- msg (\d+) (user|assistant) -->$/gm;
 const PENDING_LINE = /^- \[.\] (.*?) <!-- pend (\d+) (\S+) -->$/;
@@ -228,21 +232,44 @@ async function readPlayerFiles(ch: string): Promise<{ file: string; player: Play
         sheet: section(body, SHEET_HEADING),
         sheet_url: str(meta.fuente),
         stats: statsFromProps(meta),
+        state: stateFromProps(meta),
       },
     });
   }
   return out;
 }
 
+function campaignSection(p: Player): string {
+  const s = p.state;
+  const hpMax = p.stats?.hp_max;
+  const money = COINS.filter((c) => s.dinero[c] != null).map((c) => `${s.dinero[c]} ${c}`);
+  const lines = [
+    hpMax != null || s.hp_actual != null ? `- **HP:** ${s.hp_actual ?? hpMax}${hpMax != null ? ` / ${hpMax}` : ""}` : "",
+    money.length ? `- **Dinero:** ${money.join(", ")}` : "",
+    s.condiciones.length ? `- **Condiciones:** ${s.condiciones.join(", ")}` : "",
+    s.inventario.length ? `- **Objetos conseguidos:**\n${s.inventario.map((x) => `  - ${x}`).join("\n")}` : "",
+    s.perdidos.length ? `- **Ya no tiene:** ${s.perdidos.join(", ")}` : "",
+  ].filter(Boolean);
+  if (!lines.length) return "";
+  return `${CAMPAIGN_HEADING}\n\n*Se actualiza sola durante la partida. Para corregir algo, editá las propiedades de arriba (\`inventario\`, \`hp_actual\`, \`po\`…).*\n\n${lines.join("\n")}\n\n`;
+}
+
 function playerBody(p: Player): string {
   const desc = p.description ? `> ${p.description}\n\n` : "";
-  return `# ${p.character}\n\n${desc}${SHEET_HEADING}\n\n${p.sheet || "(Sin ficha importada. Usá /importar o escribila acá.)"}\n`;
+  return `# ${p.character}\n\n${desc}${campaignSection(p)}${SHEET_HEADING}\n\n${p.sheet || "(Sin ficha importada. Usá /importar o escribila acá.)"}\n`;
 }
 
 async function writePlayer(ch: string, p: Player, previousFile?: string) {
   const dir = await channelDir(ch);
   const file = path.join(dir, PLAYERS_DIR, `${safeName(p.character)}.md`);
-  const meta = { user_id: p.user_id, personaje: p.character, descripcion: p.description, fuente: p.sheet_url, ...(p.stats ? statsToProps(p.stats) : {}) };
+  const meta = {
+    user_id: p.user_id,
+    personaje: p.character,
+    descripcion: p.description,
+    fuente: p.sheet_url,
+    ...(p.stats ? statsToProps(p.stats) : {}),
+    ...stateToProps(p.state),
+  };
   await writeFile(file, renderNote(meta, playerBody(p)));
   if (previousFile && previousFile !== file) await fs.rm(previousFile, { force: true });
 }
@@ -260,17 +287,40 @@ export async function getPlayer(ch: string, userId: string): Promise<Player | nu
 export function upsertPlayer(ch: string, userId: string, character: string, description: string): Promise<void> {
   return serialize(ch, async () => {
     const existing = (await readPlayerFiles(ch)).find((f) => f.player.user_id === userId);
-    const base: Player = existing?.player ?? { user_id: userId, character, description: "", sheet: "", sheet_url: "", stats: null };
+    const base: Player = existing?.player ?? { user_id: userId, character, description: "", sheet: "", sheet_url: "", stats: null, state: emptyState() };
     if (base.sheet.startsWith("(Sin ficha importada")) base.sheet = "";
     await writePlayer(ch, { ...base, character, description: description || base.description }, existing?.file);
   });
 }
 
-/** /importar: crea o actualiza el personaje con la ficha leída. */
+/** /importar: crea o actualiza el personaje con la ficha leída. Lo conseguido en la campaña se conserva. */
 export function savePlayerSheet(ch: string, userId: string, character: string, description: string, sheet: string, url: string, stats: Stats | null = null): Promise<void> {
   return serialize(ch, async () => {
     const existing = (await readPlayerFiles(ch)).find((f) => f.player.user_id === userId);
-    await writePlayer(ch, { user_id: userId, character, description, sheet, sheet_url: url, stats }, existing?.file);
+    await writePlayer(ch, { user_id: userId, character, description, sheet, sheet_url: url, stats, state: existing?.player.state ?? emptyState() }, existing?.file);
+  });
+}
+
+/** Escribe en la nota de cada personaje lo que cambió en el turno. Devuelve los cambios que sí se aplicaron. */
+export function applyChanges(ch: string, changes: Change[]): Promise<Change[]> {
+  return serialize(ch, async () => {
+    const files = await readPlayerFiles(ch);
+    const applied: Change[] = [];
+    for (const change of changes) {
+      const f = files.find((x) => norm(x.player.character) === norm(change.character));
+      if (!f) continue;
+      const p = f.player;
+      let state = p.state;
+      // La primera vez que cambia el dinero, la cuenta arranca desde lo que dice la ficha.
+      if (change.ops.some((o) => o.kind === "money") && !COINS.some((c) => state.dinero[c] != null)) {
+        state = { ...state, dinero: moneyFromSheet(p.sheet) };
+      }
+      state = applyOps(state, change.ops, p.stats?.hp_max);
+      const sheet = p.sheet.startsWith("(Sin ficha importada") ? "" : p.sheet;
+      await writePlayer(ch, { ...p, sheet, state }, f.file);
+      applied.push(change);
+    }
+    return applied;
   });
 }
 

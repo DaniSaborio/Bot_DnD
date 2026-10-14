@@ -17,6 +17,7 @@ import { checkAttachment } from "./pdf";
 import { runTurn, advance, resolveRoll, askOoc, maybeCompact, importSheet, quotaReport, type GameEnv, type SheetSource } from "./game";
 import { initQuota } from "./quota";
 import { statsSummary } from "./stats";
+import { stateLine } from "./changes";
 import { warmUp, ollamaModel } from "./ollama";
 
 try {
@@ -207,7 +208,8 @@ async function handleCommand(i: ChatInputCommandInteraction) {
       const numbers = player.stats
         ? `\n**Números que usa el bot para tus tiradas:**\n\`\`\`\n${statsSummary(player.stats)}\n\`\`\``
         : "\n⚠️ Sin estadísticas exactas: el bot busca los bonificadores en el texto de la ficha.";
-      const head = `📜 **${player.character}**${player.description ? ` — ${player.description}` : ""}${numbers}`;
+      const state = stateLine(player.state, player.stats?.hp_max);
+      const head = `📜 **${player.character}**${player.description ? ` — ${player.description}` : ""}${state ? `\n**En la campaña:** ${state}` : ""}${numbers}`;
       const room = 2000 - head.length - source.length - 12;
       const sheet = room > 100 ? `\n\`\`\`\n${player.sheet.length > room ? player.sheet.slice(0, room - 1) + "…" : player.sheet}\n\`\`\`` : "";
       return reply(i, `${head}${sheet}${source}`, true);

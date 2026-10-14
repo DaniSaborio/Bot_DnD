@@ -8,6 +8,7 @@ import { dmSystemPrompt, oocSystemPrompt, SUMMARY_SYSTEM, SHEET_SYSTEM } from ".
 import { fetchNivel20Sheet } from "./nivel20";
 import { fetchPdfText, type DiscordAttachment } from "./pdf";
 import { statsFromImport, type Stats } from "./stats";
+import { extractChanges, describeChanges } from "./changes";
 import { mergeStats } from "./sheetparse";
 
 export interface GameEnv extends AIEnv {
@@ -54,7 +55,7 @@ export async function runTurn(env: GameEnv, ch: string, instruction?: string): P
     const length = LENGTH[turnLength(lines, instruction)];
     const userBlock = lines.join("\n");
 
-    const narration = await callAI(
+    const raw = await callAI(
       env,
       "narrar",
       dmSystemPrompt(camp, players),
@@ -62,9 +63,12 @@ export async function runTurn(env: GameEnv, ch: string, instruction?: string): P
       length.tokens,
     );
 
+    // El bloque [cambios] no se publica: se escribe en la nota de cada personaje.
+    const { text: narration, changes } = extractChanges(raw, players.map((p) => p.character));
     const maxId = pending.length ? pending[pending.length - 1].id : 0;
     await db.commitTurn(ch, userBlock, narration, maxId);
-    return narration;
+    const applied = changes.length ? await db.applyChanges(ch, changes) : [];
+    return applied.length ? `${narration}\n-# 📝 Anotado en la hoja: ${describeChanges(applied)}` : narration;
   } finally {
     await db.unlock(ch);
   }

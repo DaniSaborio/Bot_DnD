@@ -1,4 +1,5 @@
 import type { Campaign, Player } from "./vault";
+import { stateLine } from "./changes";
 
 function playerList(players: Player[]): string {
   if (!players.length) return "(Todavía nadie se unió con /unirse o /importar.)";
@@ -15,8 +16,12 @@ function playerBrief(players: Player[]): string {
   if (!players.length) return "(Todavía nadie se unió con /unirse o /importar.)";
   return players
     .map((p) => {
-      const vitals = p.sheet.split("\n").find((l) => /\b(HP|PG|CA)\b/i.test(l));
-      return `- ${p.character}${p.description ? `: ${p.description}` : ""}${vitals ? ` (${vitals.replace(/^[-•\s]+/, "").trim()})` : ""}`;
+      const vitals = p.stats
+        ? [p.stats.ca != null ? `CA ${p.stats.ca}` : ""].filter(Boolean).join("")
+        : (p.sheet.split("\n").find((l) => /\b(HP|PG|CA)\b/i.test(l)) ?? "").replace(/^[-•\s]+/, "").trim();
+      const state = stateLine(p.state, p.stats?.hp_max);
+      const extra = [vitals, state].filter(Boolean).join(" · ");
+      return `- ${p.character}${p.description ? `: ${p.description}` : ""}${extra ? ` (${extra})` : ""}`;
     })
     .join("\n");
 }
@@ -52,7 +57,16 @@ REGLAS PARA VOS COMO DM
 - Las decisiones tienen consecuencias; los personajes pueden fallar, quedar inconscientes o morir según las reglas.
 - No reveles secretos de la trama antes de tiempo.
 - Terminá con la situación abierta. En turnos cortos alcanza con una pregunta breve ("¿Qué hacen?").
-- Usá formato de Discord con moderación: **negrita** para nombres importantes, *cursiva* para diálogos de NPCs si ayuda. Nada de encabezados ni listas largas salvo en combate.`;
+- Usá formato de Discord con moderación: **negrita** para nombres importantes, *cursiva* para diálogos de NPCs si ayuda. Nada de encabezados ni listas largas salvo en combate.
+
+REGISTRO DE CAMBIOS (lo lee el bot y lo escribe en la hoja del personaje; los jugadores no lo ven)
+Si en ESTE turno un personaje jugador consigue o pierde un objeto, gana o gasta dinero, recibe daño o curación, o gana o pierde una condición, agregá al final de la narración:
+[cambios]
+Kael: +objeto Amuleto de plata | HP -9
+Lyra: +po 25 | -objeto Antorcha | +condición envenenada
+[/cambios]
+Operaciones: "+objeto <nombre>", "-objeto <nombre>", "+po N" / "-po N" (también pp, pe, pc, ppt), "HP -N" (daño), "HP +N" (curación), "+condición <nombre>", "-condición <nombre>".
+Solo lo que pasó en este turno y quedó claro en la narración (si lo agarró, se lo dieron o lo compró). Un objeto que solo ven o que queda en el suelo no cuenta. Si no cambió nada, no agregues el bloque.`;
 }
 
 export function oocSystemPrompt(camp: Campaign, players: Player[]): string {
